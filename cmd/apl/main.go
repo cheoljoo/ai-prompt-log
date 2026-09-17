@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -14,10 +15,26 @@ import (
 
 const gitURL = "https://github.com/cheoljoo/ai-prompt-log"
 
+// version is set at build time via -ldflags "-X main.version=...", which
+// .goreleaser.yaml does for every release. For `go install .../cmd/apl@vX.Y.Z`
+// or a plain `go build`, it falls back to the module version embedded by
+// the Go toolchain (debug.ReadBuildInfo), then finally to "dev".
+var version = "dev"
+
+func resolvedVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return version
+}
+
 const keybindingsHelp = `Keybindings (vi-style):
   j/k, up/down     move within the focused pane
   g/G              jump to top / bottom
-  Ctrl+F/Ctrl+B    page down / up
+  Ctrl+F/Ctrl+B/Space  page down / up
   Ctrl+D/Ctrl+U    half page down / up
   l, Tab, Enter    focus next pane (drill in)
   h, Shift+Tab, Esc  focus previous pane (back)
@@ -37,6 +54,8 @@ func main() {
 	viewBackup := flag.Bool("view-backup", false, "Browse a previous --backup (3-pane aggregate view, rooted at --backup-dir)")
 	depth := flag.Int("depth", 0, "With --backup: walk up N directories from cwd and back up every project whose real cwd is that directory or a descendant of it. Omit to back up only the current project.")
 	backupDir := flag.String("backup-dir", "", "Backup directory for --backup / --view-backup (default: ~/ai-prompt-log.backup/)")
+	showVersion := flag.Bool("version", false, "Print the apl version and exit")
+	flag.BoolVar(showVersion, "v", false, "shorthand for --version")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "apl (AI Prompt Log viewer) - a tig-style TUI for browsing Claude Code session logs,\n")
@@ -48,9 +67,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "`apl --view-backup` browses that backup with the same 3-pane view.\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: apl [-a|--all | --backup | --view-backup] [--depth N] [--backup-dir PATH]\n\n")
 		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\n%s\nSource: %s\n", keybindingsHelp, gitURL)
+		fmt.Fprintf(os.Stderr, "\n%s\napl %s\nSource: %s\n", keybindingsHelp, resolvedVersion(), gitURL)
 	}
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("apl %s\n", resolvedVersion())
+		return
+	}
 
 	depthGiven := false
 	flag.Visit(func(f *flag.Flag) {

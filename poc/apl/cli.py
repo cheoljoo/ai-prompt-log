@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
 GIT_URL = "https://github.com/cheoljoo/ai-prompt-log"
@@ -17,13 +18,20 @@ KEYBINDINGS_HELP = """\
 Keybindings (vi-style):
   j/k, up/down     move within the focused pane
   g/G              jump to top / bottom
-  Ctrl+F/Ctrl+B    page down / up
+  Ctrl+F/Ctrl+B/Space  page down / up
   Ctrl+D/Ctrl+U    half page down / up
   l, Tab, Enter    focus next pane (drill in)
   h, Shift+Tab, Esc  focus previous pane (back)
   F1               command palette (theme, screenshot, quit, ...)
   q                quit
 """
+
+
+def _version() -> str:
+    try:
+        return _pkg_version("apl")
+    except PackageNotFoundError:
+        return "dev"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,7 +50,13 @@ def build_parser() -> argparse.ArgumentParser:
             "that backup with the same 3-pane view."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"{KEYBINDINGS_HELP}\nSource: {GIT_URL}",
+        epilog=f"{KEYBINDINGS_HELP}\napl {_version()}\nSource: {GIT_URL}",
+    )
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"apl {_version()}",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(

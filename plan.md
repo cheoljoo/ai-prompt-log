@@ -98,12 +98,15 @@ Claude Code는 이미 세션마다 prompt/응답을 다음 위치에 JSONL로 �
 │                  ││                              ││     command: ls -la ...          │
 └──────────────────┘└──────────────────────────────┘└──────────────────────────────────┘
 ```
-- 색: 프로젝트명(bold cyan), 마지막 활동(초록=오늘/노랑=이번주/회색=그 외), 브랜치(magenta), `[cmd]`/`[subagent]` 태그(yellow), USER/ASSISTANT 헤더(역상 cyan/green), TOOL 호출(yellow)
+- 색: 프로젝트명(bold cyan), 마지막 활동(초록=오늘/노랑=이번주/회색=그 외), 브랜치(magenta), `[cmd]`/`[subagent]` 태그(yellow), USER/FINAL-RESULT/ASSISTANT 헤더(역상 cyan/blue/green), TOOL 호출(yellow)
 - 포커스된 pane은 굵은 테두리(`$accent`)로 강조되어 지금 어느 pane을 조작 중인지 항상 보임
 - 상세 pane의 tool 호출은 인자별로 들여써서 한 줄씩 표시하고, 긴 값(파일 write content 등)은 잘라서 "(전체 N자)"로 표시 — 가독성 우선
+- 상세 pane은 **`USER → FINAL-RESULT → ASSISTANT`** 순서로 보여준다(v0.1의 `USER → ASSISTANT`에서 재구성). `FINAL-RESULT`는 assistant 응답 끝에 붙은 연속 text 블록(도구 호출 이후 마무리 결론)만 추출한 것 — prompt와 결론을 먼저 보고, 필요할 때만 그 아래 `ASSISTANT`의 전체 trace(도구 호출 포함, 끝에 같은 결론이 다시 나옴)를 본다는 사용성을 위해 의도적으로 중복 표시한다.
 
 ### 공통 키바인딩 (vi 스타일)
-`j`/`k` 위·아래 이동(방향키도 동일), `g`/`G` 처음·끝, `Ctrl+F`/`Ctrl+B` 한 페이지 아래·위, `Ctrl+D`/`Ctrl+U` 반 페이지 아래·위, `l`/`Tab`/`Enter` 다음 pane으로 포커스 이동, `h`/`Shift+Tab`/`Escape` 이전 pane으로 포커스 이동, `q` 종료(App 레벨 `priority` 바인딩이라 어느 pane에 포커스가 있어도 항상 동작), `F1` command palette(Textual 기본 제공 명령 검색 팝업 — 기본 `Ctrl+P`가 Termius와 충돌해 `F1`로 변경). `/` 검색은 아직 미구현(§7 후속 과제).
+`j`/`k` 위·아래 이동(방향키도 동일), `g`/`G` 처음·끝, `Ctrl+F`/`Ctrl+B`/`Space` 한 페이지 아래·위(`Space`=`Ctrl+F`와 동일), `Ctrl+D`/`Ctrl+U` 반 페이지 아래·위, `l`/`Tab`/`Enter` 다음 pane으로 포커스 이동, `h`/`Shift+Tab`/`Escape` 이전 pane으로 포커스 이동, `q` 종료(App 레벨 `priority` 바인딩이라 어느 pane에 포커스가 있어도 항상 동작), `F1` command palette(Textual 기본 제공 명령 검색 팝업 — 기본 `Ctrl+P`가 Termius와 충돌해 `F1`로 변경, Python 전용). `/` 검색은 아직 미구현(§7 후속 과제).
+
+`apl --version`/`-v`로 버전 확인 가능(Go/Python 둘 다), `apl --help` 하단에도 버전 표시.
 
 `apl --help`로 사용법·키바인딩 표·오픈소스 저장소 주소를 확인할 수 있다.
 

@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/cheoljoo/ai-prompt-log/internal/backup"
+	"github.com/cheoljoo/ai-prompt-log/internal/model"
 	"github.com/cheoljoo/ai-prompt-log/internal/source"
 )
 
@@ -199,4 +201,60 @@ func TestViewBackupRealData(t *testing.T) {
 		t.Fatal("expected first project's prompts preloaded from backup")
 	}
 	t.Logf("view-backup: %d projects, first project prompts=%d", len(m.projects), len(m.currentPrompts))
+}
+
+func TestSpaceAndGRealData(t *testing.T) {
+	mode, dir := source.DetectMode("/data01/cheoljoo.lee/code/ai-prompt-log", false)
+	m := New(mode, dir)
+	m = update(m, tea.WindowSizeMsg{Width: 160, Height: 40})
+	before := m.promptsTable.Cursor()
+
+	m = update(m, key(" "))
+	afterSpace := m.promptsTable.Cursor()
+	if afterSpace <= before {
+		t.Fatalf("space should page down like ctrl+f: %d -> %d", before, afterSpace)
+	}
+	t.Logf("space: cursor %d -> %d", before, afterSpace)
+
+	m = update(m, key("G"))
+	bottom := m.promptsTable.Cursor()
+	if bottom != len(m.promptsTable.Rows())-1 {
+		t.Fatalf("G should reach the last row: got %d, row_count=%d", bottom, len(m.promptsTable.Rows()))
+	}
+	t.Logf("G: cursor -> %d (row_count=%d)", bottom, len(m.promptsTable.Rows()))
+}
+
+func TestFinalResultSectionRealData(t *testing.T) {
+	mode, dir := source.DetectMode("/data01/cheoljoo.lee/code/ai-prompt-log", false)
+	m := New(mode, dir)
+	m = update(m, tea.WindowSizeMsg{Width: 160, Height: 40})
+
+	var target *model.Prompt
+	for i := range m.currentPrompts {
+		p := &m.currentPrompts[i]
+		hasTool := false
+		for _, b := range p.Blocks {
+			if b.Kind == "tool_use" {
+				hasTool = true
+			}
+		}
+		if hasTool && len(p.Blocks) > 0 && p.Blocks[len(p.Blocks)-1].Kind == "text" {
+			target = p
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("expected a real prompt with tool calls + trailing text")
+	}
+	text := formatPromptDetail(*target)
+	if !strings.Contains(text, "FINAL-RESULT") {
+		t.Fatal("expected a FINAL-RESULT section")
+	}
+	userIdx := strings.Index(text, "USER")
+	finalIdx := strings.Index(text, "FINAL-RESULT")
+	assistantIdx := strings.Index(text, "ASSISTANT")
+	if !(userIdx < finalIdx && finalIdx < assistantIdx) {
+		t.Fatalf("expected USER -> FINAL-RESULT -> ASSISTANT order, got indices %d, %d, %d", userIdx, finalIdx, assistantIdx)
+	}
+	t.Logf("FINAL-RESULT section present and correctly ordered")
 }

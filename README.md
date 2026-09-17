@@ -63,6 +63,8 @@ apl --backup                  # back up just the current project
 apl --backup --depth 1        # + every sibling project under the parent directory
 apl --backup --backup-dir PATH  # use a custom backup location (default: ~/ai-prompt-log.backup/)
 apl --view-backup              # browse a previous --backup (3 panes, like --all)
+
+apl --version    # or -v
 ```
 
 `apl` (no flag) walks up from the current directory to find the nearest ancestor that actually has logged sessions — so it also works from a subdirectory of a project, not just its root.
@@ -81,7 +83,7 @@ Claude Code only keeps session logs under `~/.claude/projects/<encoded-cwd>/` �
 |---|---|
 | `j` / `k` (or ↑ / ↓) | move within the focused pane |
 | `g` / `G` | jump to top / bottom |
-| `Ctrl+F` / `Ctrl+B` | page down / up |
+| `Ctrl+F` / `Ctrl+B` / `Space` | page down / up (`Space` = page down) |
 | `Ctrl+D` / `Ctrl+U` | half page down / up |
 | `l`, `Tab`, `Enter` | focus the next pane to the right (drill in) |
 | `h`, `Shift+Tab`, `Esc` | focus the previous pane (back) |
@@ -93,6 +95,8 @@ Claude Code only keeps session logs under `~/.claude/projects/<encoded-cwd>/` �
 Claude Code already logs every session as JSONL at `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`. `apl` is a **read-only viewer** over that data — it never writes to it, never uploads it anywhere, and (as of the current design) never copies it elsewhere either: `apl --all` reads `~/.claude/projects` directly, live.
 
 A "prompt" is one user turn plus the assistant text/tool-call blocks that follow it, up to the next user turn. This also means `/clear` and context-compaction boundaries stay visible — see [`docs/data-model.md`](docs/data-model.md) for the exact parsing rules, verified against real session logs.
+
+The Detail pane shows, in order: **USER** (the prompt), **FINAL-RESULT** (the assistant's concluding text, so you can see what happened at a glance), then **ASSISTANT** (the full trace — every tool call in order, ending with that same final text again). The repetition is deliberate: skim the top two sections first, and only scroll into the full trace when you need to know *how* it got there.
 
 ## Project status
 

@@ -72,3 +72,10 @@ Go 1.23.4(공식 바이너리 배포판 직접 설치 — 이 환경의 Homebrew
 | 배포 바이너리/런타임 크기 | 5.8MB 단일 바이너리 | 16MB(venv, Python 인터프리터+의존성 별도 필요) | |
 
 결론: 초기 구현은 실제로 Go가 더 느렸지만(표준 라이브러리 JSON 스트리밍 오용 + 알고리즘 버그), 근본 원인을 고치고 나니 시작 속도·메모리·데이터 로딩 전부 Go가 앞섬 — plan.md §5의 원래 설계 근거가 사후적으로 검증됨.
+
+## `--version`/`-v`, Space 키, Detail pane USER→FINAL-RESULT→ASSISTANT 재구성 (Python과 동일하게)
+
+- `main.go`에 `version` 패키지 변수 추가, `.goreleaser.yaml`의 `-X main.version={{.Version}}`이 실제로 주입되도록 함. `go build`/`go install`처럼 ldflags 없이 빌드될 때는 `runtime/debug.ReadBuildInfo()`로 폴백(실측: git 태그 상태에서 그냥 `go build`만 해도 "v0.2.2+dirty"를 정확히 잡아냄). `--help` 하단에도 버전 표시.
+- Space 키(`tea.KeyMsg.String()`이 `" "`(공백 문자 그대로)임을 실측 확인 후) `ctrl+f`와 동일하게 페이지다운 처리.
+- `formatPromptDetail`을 Python과 동일하게 `USER → FINAL-RESULT → ASSISTANT` 순서로 재구성(`finalResultText`: 블록 리스트 끝에서부터 연속된 text 블록만 역순으로 모음).
+- `go test ./internal/tui/...`에 `TestSpaceAndGRealData`, `TestFinalResultSectionRealData` 추가, 실제 데이터로 순서·커서 이동 검증 통과.

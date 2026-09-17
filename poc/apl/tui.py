@@ -67,8 +67,26 @@ def _format_tokens(n: int) -> str:
     return str(n)
 
 
+def _final_result_text(prompt: model.Prompt) -> str:
+    """The trailing run of "text" blocks at the end of the assistant's
+    response -- i.e. its concluding remarks, after any tool calls. Empty if
+    the response ends on a tool_use with no closing text."""
+    texts = []
+    for block in reversed(prompt.blocks):
+        if block.kind != "text":
+            break
+        texts.append(block.text)
+    return "\n\n".join(reversed(texts))
+
+
 def format_prompt_detail(prompt: model.Prompt) -> str:
     """Human-readable, indented rendering of one prompt + its AI result.
+
+    Ordered USER -> FINAL-RESULT -> ASSISTANT (not USER -> ASSISTANT) so the
+    prompt and its conclusion are visible immediately, with the full
+    tool-by-tool trace available below only if needed -- the final result
+    text is deliberately repeated at the end of ASSISTANT too, in its
+    original place in the trace.
 
     Returns a Textual/Rich markup *string* (not a Text/renderable object) —
     passing raw Rich renderables to Static crashes on this Textual version
@@ -87,6 +105,14 @@ def format_prompt_detail(prompt: model.Prompt) -> str:
         escape(prompt.user_text or ""),
         "",
     ]
+
+    final_result = _final_result_text(prompt)
+    if final_result:
+        lines.append("[reverse bold blue] FINAL-RESULT [/reverse bold blue]")
+        lines.append("")
+        lines.append(escape(final_result))
+        lines.append("")
+
     if prompt.blocks:
         lines.append("[reverse bold green] ASSISTANT [/reverse bold green]")
         lines.append("")
@@ -133,7 +159,7 @@ class AplScreen(Screen):
         Binding("G", "cursor_bottom", "Bottom", show=False),
         Binding("l,tab", "focus_next_pane", "Next pane", key_display="l"),
         Binding("h,shift+tab,escape", "focus_prev_pane", "Prev pane", key_display="h"),
-        Binding("ctrl+f", "page_down", "Page down", key_display="^F"),
+        Binding("ctrl+f,space", "page_down", "Page down", key_display="^F/Space"),
         Binding("ctrl+b", "page_up", "Page up", key_display="^B"),
         Binding("ctrl+d", "half_page_down", "½ page down", key_display="^D"),
         Binding("ctrl+u", "half_page_up", "½ page up", key_display="^U"),

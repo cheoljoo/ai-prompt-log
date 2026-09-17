@@ -29,6 +29,7 @@ const maxToolValueLen = 160
 
 var (
 	styleUserBadge      = lipgloss.NewStyle().Reverse(true).Bold(true).Foreground(lipgloss.Color("6"))
+	styleFinalBadge     = lipgloss.NewStyle().Reverse(true).Bold(true).Foreground(lipgloss.Color("4"))
 	styleAssistantBadge = lipgloss.NewStyle().Reverse(true).Bold(true).Foreground(lipgloss.Color("2"))
 	styleDim            = lipgloss.NewStyle().Faint(true)
 	styleMagenta        = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
@@ -68,6 +69,28 @@ func truncateValue(s string) string {
 	return string(runes[:maxToolValueLen]) + fmt.Sprintf("… (전체 %d자)", len(runes))
 }
 
+// finalResultText is the trailing run of "text" blocks at the end of the
+// assistant's response -- its concluding remarks, after any tool calls.
+// Empty if the response ends on a tool_use with no closing text.
+func finalResultText(p model.Prompt) string {
+	var texts []string
+	for i := len(p.Blocks) - 1; i >= 0; i-- {
+		if p.Blocks[i].Kind != "text" {
+			break
+		}
+		texts = append(texts, p.Blocks[i].Text)
+	}
+	for i, j := 0, len(texts)-1; i < j; i, j = i+1, j-1 {
+		texts[i], texts[j] = texts[j], texts[i]
+	}
+	return strings.Join(texts, "\n\n")
+}
+
+// formatPromptDetail renders USER -> FINAL-RESULT -> ASSISTANT (not just
+// USER -> ASSISTANT) so the prompt and its conclusion are visible
+// immediately, with the full tool-by-tool trace available below only if
+// needed -- the final result text is deliberately repeated at the end of
+// ASSISTANT too, in its original place in the trace.
 func formatPromptDetail(p model.Prompt) string {
 	var b strings.Builder
 
@@ -88,6 +111,13 @@ func formatPromptDetail(p model.Prompt) string {
 	b.WriteString("\n")
 	b.WriteString(p.UserText)
 	b.WriteString("\n\n")
+
+	if final := finalResultText(p); final != "" {
+		b.WriteString(styleFinalBadge.Render(" FINAL-RESULT "))
+		b.WriteString("\n\n")
+		b.WriteString(final)
+		b.WriteString("\n\n")
+	}
 
 	if len(p.Blocks) > 0 {
 		b.WriteString(styleAssistantBadge.Render(" ASSISTANT "))
@@ -295,7 +325,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursorTop()
 	case "G":
 		m.cursorBottom()
-	case "ctrl+f":
+	case "ctrl+f", " ":
 		m.pageDown()
 	case "ctrl+b":
 		m.pageUp()
@@ -489,7 +519,7 @@ func (m Model) View() string {
 	panes = append(panes, m.renderPane("Detail", m.detail.View(), m.focus == paneDetail))
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, panes...)
-	footer := styleDim.Render("j/k move  g/G top/bottom  ^F/^B page  ^D/^U half-page  l/Tab/Enter next pane  h/S-Tab/Esc prev pane  q quit")
+	footer := styleDim.Render("j/k move  g/G top/bottom  ^F/^B/Space page  ^D/^U half-page  l/Tab/Enter next pane  h/S-Tab/Esc prev pane  q quit")
 	return body + "\n" + footer
 }
 

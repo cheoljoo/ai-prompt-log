@@ -85,6 +85,12 @@
 
 `assistant` 레코드의 `message.usage`(input/cache_creation/cache_read/output tokens)를 Prompt별로 합산해 `Prompt.total_tokens`에 저장, Prompts pane에 "Tokens" 컬럼(예: `30.3M`)으로 표시하고 Detail pane 헤더에도 표시. 실제 이 세션 데이터(18개 prompt)로 검증 — 캐시 생성 비중이 커서 긴 대화의 prompt는 수백만~수천만 토큰까지 나옴(예: 큰 도구 호출이 많은 turn은 30.3M).
 
+## `--version`/`-v`, Space 키, Detail pane USER→FINAL-RESULT→ASSISTANT 재구성
+
+- `apl --version`/`-v`: argparse `action="version"`로 구현, `importlib.metadata.version("apl")` 사용(패키지 미설치 시 "dev" 폴백). `apl --help` 하단에도 버전 표시. `pyproject.toml` 버전을 저장소 태그(`0.2.2`)에 맞춰 동기화.
+- `Space` 키를 `Ctrl+F`(page down)와 동일하게 바인딩.
+- **Detail pane 순서 변경**: 기존 `USER → ASSISTANT`(prompt + 전체 동작 trace)에서 `USER → FINAL-RESULT → ASSISTANT`로 바꿈. `FINAL-RESULT`는 assistant 응답 끝에 연속된 text 블록들(도구 호출 이후 마무리 설명)만 뽑아 보여주고, 그 아래 `ASSISTANT`에는 기존처럼 전체 trace(도구 호출 포함)가 그대로 나오며 끝에 같은 최종 결론이 다시 나온다 — 중복이지만 "결론 먼저 보고 필요하면 과정을 본다"는 사용성을 위한 의도적 설계. 실제 이 대화 세션의 prompt로 헤드리스 검증(`USER`/`FINAL-RESULT`/`ASSISTANT` 순서, 실제 텍스트 일치).
+
 ## 알려진 POC 한계 (Agent C/D에서 다룰 것)
 - `/` 검색, 날짜/브랜치/source 필터, 통계 화면, export, `--since`/`--tail`, 세션 재개(`--resume`) 표시 — plan.md §7에서 반영하기로 한 기능들은 아직 미구현(POC는 최소 골격만)
 - `thinking` 블록은 항상 숨김(토글 없음)
