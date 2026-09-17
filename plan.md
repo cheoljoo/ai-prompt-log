@@ -60,45 +60,31 @@ Claude Code는 이미 세션마다 prompt/응답을 다음 위치에 JSONL로 �
 
 ## 3. UX / 화면 설계
 
+**(v0.1 실사용 피드백으로 재설계됨 — 최초안은 화면 전체를 push/pop하는 Screen 전환 방식이었으나, "화면 전환 대신 나눠서 보여달라"는 피드백에 따라 아래처럼 분할 화면(pane) 방식으로 바뀜. 자세한 변경 이력은 `agents/B-poc.md`.)**
+
 ### 진입 동작 판단
 apl 시작 시 현재 디렉터리(또는 상위 git root)가 llm_wiki 저장소인지 확인한다.
-- **llm_wiki 안** → Level 1(Project list)부터 시작, 캐시 디렉터리(§2-1) 기준 3단계
-- **그 외 모든 프로젝트** → Level 1 생략, 바로 자기 프로젝트의 Prompt list(구 Level 2)부터 시작, `~/.claude/projects/<encoded-cwd>/` 직접 읽음(2단계)
+- **llm_wiki 안(캐시 디렉터리 존재)** → `[ Projects | Prompts | Detail ]` 3-pane
+- **그 외 모든 프로젝트** → Projects pane 없이 `[ Prompts | Detail ]` 2-pane, `~/.claude/projects/<encoded-cwd>/` 직접 읽음
 
-### Level 1 — Project list (llm_wiki 안에서만 표시)
-```
- ai-prompt-log        12 prompts   last: 2h ago
- llm_wiki             340 prompts  last: 5m ago
- headless-browser-with-ai  88 prompts  last: 3d ago
-```
-- 정렬: 최근 활동순(기본), 이름순 토글
-- 색: 프로젝트명(bold cyan), prompt 개수(dim), 마지막 활동 시각(초록=오늘, 노랑=이번주, 회색=그 외) — tig의 date coloring과 동일한 감각
+세 pane(또는 두 pane)은 화면 전환 없이 **동시에 표시**되고, 왼쪽 리스트 pane에서 커서를 움직이면(Enter 없이) 오른쪽 pane이 즉시 갱신된다 — tig의 main+diff 분할 뷰와 같은 감각.
 
-### Level 2 — Prompt list (선택한 project 안)
 ```
- 2026-09-16 11:53  main   "apl tool을 만들어주세요..."
- 2026-09-15 18:20  main   "plan.md 검토해줘"
- 2026-09-14 09:02  fix/x  [subagent] "테스트 실패 원인 분석"
+┌ Projects ───────┐┌ Prompts ────────────────────┐┌ Detail ─────────────────────────┐
+│ ai-prompt-log    ││ 2026-09-16 11:53  main  ...  ││ USER  2026-09-16 11:53:07        │
+│ llm_wiki         ││ 2026-09-15 18:20  main  ...  ││ apl tool을 만들어주세요...        │
+│ hermes           ││ 2026-09-14 09:02 [subagent]  ││                                  │
+│ ...              ││ ...                          ││ ASSISTANT                        │
+│                  ││                              ││   ▸ TOOL  Bash                   │
+│                  ││                              ││     command: ls -la ...          │
+└──────────────────┘└──────────────────────────────┘└──────────────────────────────────┘
 ```
-- tig의 commit list처럼: 날짜(dim), 브랜치(magenta), prompt 첫 줄 요약(기본색), 서브에이전트/sidechain은 접두 태그(yellow)
-- `/` 검색, `n`/`N` 다음/이전 매치 (tig 동일 키)
+- 색: 프로젝트명(bold cyan), 마지막 활동(초록=오늘/노랑=이번주/회색=그 외), 브랜치(magenta), `[cmd]`/`[subagent]` 태그(yellow), USER/ASSISTANT 헤더(역상 cyan/green), TOOL 호출(yellow)
+- 포커스된 pane은 굵은 테두리(`$accent`)로 강조되어 지금 어느 pane을 조작 중인지 항상 보임
+- 상세 pane의 tool 호출은 인자별로 들여써서 한 줄씩 표시하고, 긴 값(파일 write content 등)은 잘라서 "(전체 N자)"로 표시 — 가독성 우선
 
-### Level 3 — Prompt + AI 결과 상세
-```
-┃ USER  2026-09-16 11:53:07                                   (cyan bar)
-┃ apl tool을 만들어주세요...
-┃
-┃ ASSISTANT                                                    (green bar)
-┃ (text 응답)
-┃
-┃ ▸ TOOL: Bash `ls -la ...`                                    (yellow, 접힘)
-┃ ▸ TOOL: Edit plan.md                                         (yellow, 접힘)
-```
-- USER / ASSISTANT-text / TOOL-call / THINKING(옵션, 기본 숨김) 을 색+아이콘으로 구분
-- 긴 응답은 tig의 diff pager처럼 스크롤, `Tab`으로 tool 블록 펼치기/접기
-
-### 공통 키바인딩 (tig 관례 최대한 재사용)
-`j/k` 이동, `Enter` drill-down, `q`/`Backspace` 뒤로가기, `/` 검색, `g/G` 처음/끝, `Tab` 블록 접기/펼치기, `Q` 종료
+### 공통 키바인딩 (vi 스타일)
+`j`/`k` 위·아래 이동(방향키도 동일), `g`/`G` 처음·끝, `Ctrl+F`/`Ctrl+B` 한 페이지 아래·위, `Ctrl+D`/`Ctrl+U` 반 페이지 아래·위, `l`/`Tab`/`Enter` 다음 pane으로 포커스 이동, `h`/`Shift+Tab`/`Escape` 이전 pane으로 포커스 이동, `q` 종료(App 레벨 `priority` 바인딩이라 어느 pane에 포커스가 있어도 항상 동작). `/` 검색은 아직 미구현(§7 후속 과제).
 
 ## 4. 아키텍처 (레이어 3개, 언어 무관하게 동일)
 

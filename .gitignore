@@ -226,3 +226,6 @@ todo/output/
 # /wiki-report 정밀 산정 결과 파일 (개인 작업 상세 내역이라 git에는 남기지 않음)
 report-*.md
 html/
+
+# 실제 자격증명을 가리키는 심볼릭 링크 (출처 불명, 절대 커밋 금지)
+secure_info.py
