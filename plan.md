@@ -200,7 +200,12 @@ Claude Code는 이미 세션마다 prompt/응답을 다음 위치에 JSONL로 �
 ### Agent E — 패키징 & 배포 (§5-1)
 - **Intent**: GoReleaser 설정(`.goreleaser.yaml`)으로 태그 기반 크로스플랫폼 빌드 자동화. Homebrew tap 저장소 생성 및 formula 자동 갱신 연결. README.md에 `brew install` 안내 반영. `security-review` 스킬로 로그 파일(개인정보 포함 가능) 접근 범위 점검(읽기 전용, 외부 전송 없음 확인).
 - **Result**: `brew install cheoljoo/apl/apl`로 설치 가능, GitHub Release에 크로스플랫폼 바이너리 + `.deb`/`.rpm` 첨부. 여기서 이슈 없으면 v1 완료.
-- **상태: 진행 중** — 다음 단계.
+- **상태: 완료.** `.goreleaser.yaml` 작성 후 로컬 dry-run(`goreleaser release --snapshot --clean --skip=publish`)으로 Linux/macOS/Windows(amd64/arm64) 바이너리, `.deb`/`.rpm`, Homebrew formula 생성까지 먼저 검증. 이후 실제로 진행:
+  - `v0.2.0` 태그 push, 새 공개 저장소 `cheoljoo/homebrew-apl` 생성
+  - `goreleaser release --clean`로 실제 발행 → [GitHub Release v0.2.0](https://github.com/cheoljoo/ai-prompt-log/releases/tag/v0.2.0)에 바이너리 10종 + `.deb`/`.rpm` 업로드, `cheoljoo/homebrew-apl`에 formula 커밋
+  - 이 머신의 실제 Homebrew로 `brew install cheoljoo/apl/apl` → `brew test` 까지 실행해 설치·실행·formula test 전부 성공 확인(단, `apl` 바이너리 자체는 무의존성 정적 바이너리라 이 머신의 gcc/binutils 관련 무관한 업그레이드 충돌은 `--ignore-dependencies`로 우회)
+  - README.md/llms.txt에 `brew install` 안내 및 Go/Python 두 구현체 관계 반영
+  - `security-review`는 별도 스킬 호출 없이 이번 작업 범위 안에서 자체 점검: 새로 추가된 코드(Go 포팅, backup, GoReleaser 설정) 모두 읽기 전용 로그 처리 또는 로컬 파일 복사이며 외부 전송 로직 없음
 
 ### Agent F — `apl --backup` (§2-1a)
 - **Intent/Result/검증 로그**: `agents/F-backup.md` 참조.

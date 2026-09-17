@@ -26,7 +26,21 @@ Panes are shown side by side and update live as you move the cursor — no scree
 
 ## Install
 
-Requires Python 3.9+ and [`uv`](https://docs.astral.sh/uv/).
+**Homebrew** (macOS and Linux, no Python/uv needed — recommended):
+
+```sh
+brew install cheoljoo/apl/apl
+```
+
+**Manually**: download a prebuilt binary (Linux/macOS/Windows, amd64/arm64) or a `.deb`/`.rpm` from the [latest release](https://github.com/cheoljoo/ai-prompt-log/releases/latest).
+
+**From source (Go)**:
+
+```sh
+go install github.com/cheoljoo/ai-prompt-log/cmd/apl@latest
+```
+
+**Python POC** (the original prototype implementation, `poc/` — requires Python 3.9+ and [`uv`](https://docs.astral.sh/uv/); has a couple of features (`--backup`/`--view-backup`) not yet ported to the Go version, see [Project status](#project-status)):
 
 ```sh
 git clone https://github.com/cheoljoo/ai-prompt-log.git
@@ -71,7 +85,7 @@ Claude Code only keeps session logs under `~/.claude/projects/<encoded-cwd>/` �
 | `Ctrl+D` / `Ctrl+U` | half page down / up |
 | `l`, `Tab`, `Enter` | focus the next pane to the right (drill in) |
 | `h`, `Shift+Tab`, `Esc` | focus the previous pane (back) |
-| `F1` | command palette (theme, screenshot, ...) |
+| `F1` | command palette (theme, screenshot, ...) — Python build only |
 | `q` | quit |
 
 ## How it works
@@ -82,7 +96,12 @@ A "prompt" is one user turn plus the assistant text/tool-call blocks that follow
 
 ## Project status
 
-This is a Python proof-of-concept (`poc/`, built with [Textual](https://textual.textualize.io/)) validating the data model and UX before a planned Go rewrite for distribution as a single static binary. See [`plan.md`](plan.md) for the full design and roadmap.
+There are two implementations, sharing the same data model and keybindings:
+
+- **`cmd/apl` + `internal/` (Go)** — the recommended one for end users. A single static binary (`bubbletea`/`lipgloss`/`bubbles`), distributed via Homebrew/`.deb`/`.rpm`/prebuilt binaries above. Feature set: `apl`, `apl --all`, `apl --help`.
+- **`poc/` (Python)** — the original prototype ([Textual](https://textual.textualize.io/)), used to validate the data model and UX before the Go port. Still ahead of the Go version on one feature: `apl --backup` / `apl --view-backup`, and has a Textual command palette on `F1` (not present in the Go build).
+
+See [`plan.md`](plan.md) for the full design, decision history, and roadmap.
 
 ## License
 
