@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/cheoljoo/ai-prompt-log/internal/backup"
 	"github.com/cheoljoo/ai-prompt-log/internal/source"
 )
 
@@ -176,11 +177,18 @@ func TestQuit(t *testing.T) {
 }
 
 func TestViewBackupRealData(t *testing.T) {
-	m := DetectAndNew("/data01/cheoljoo.lee/code/ai-prompt-log", false, "/tmp/go-backup-real-test")
+	backupDir := t.TempDir()
+	depth := 1
+	stats := backup.Run("/data01/cheoljoo.lee/code/ai-prompt-log", &depth, backupDir)
+	if stats.Projects != 16 {
+		t.Fatalf("expected backup.Run to find 16 real projects, got %d", stats.Projects)
+	}
+
+	m := DetectAndNew("/data01/cheoljoo.lee/code/ai-prompt-log", false, backupDir)
 	if m.mode != "aggregate" {
 		t.Fatalf("expected aggregate mode via root override, got %s", m.mode)
 	}
-	if m.rootDir != "/tmp/go-backup-real-test" {
+	if m.rootDir != backupDir {
 		t.Fatalf("expected root override to be used, got %s", m.rootDir)
 	}
 	m = update(m, tea.WindowSizeMsg{Width: 200, Height: 45})

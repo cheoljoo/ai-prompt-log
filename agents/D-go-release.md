@@ -49,3 +49,26 @@ Go 1.23.4(공식 바이너리 배포판 직접 설치 — 이 환경의 Homebrew
 - CLI 실제 실행: `apl --backup --depth 1 --backup-dir <실제경로>` → `16 project(s), 26 copied` 확인 후 재실행 시 `26 unchanged`(Python과 동일한 결과), `apl --depth 1`(단독)과 `apl --all --backup`(동시 지정) 둘 다 exit 2로 정상 거부
 
 이제 Go/Python 두 구현이 완전히 동일한 기능 집합을 가짐(단, Python의 `F1` command palette는 Textual 프레임워크가 공짜로 주는 chrome이라 이식 대상에서 제외 — README에 명시).
+
+## 성능 비교 조사 (사용자 요청) — Go가 Python보다 느렸던 실제 버그 3건 발견·수정
+
+"Go/Python 응답 속도·CPU 사용률·실행 속도를 비교해달라"는 요청에 실제 이 머신의 `~/.claude/projects`(16개 프로젝트, 104M) 전체를 로딩하는 동일 작업(`apl --all` 시작 시 하는 일)을 `/usr/bin/time -v`로 측정. **처음 측정에서 Go가 Python보다 5배 이상 느린 게 드러나서**(4.4s vs 0.87s) `go tool pprof`로 원인을 찾아 고침 — plan.md §5에서 Go를 고른 이유("대용량 jsonl 스트리밍 파싱 성능")가 실제로는 거짓이었던 것.
+
+**발견한 버그 3건** (전부 실제 프로파일링으로 근거 확인):
+1. **`sort.Slice` 비교 함수 안에서 파일을 다시 읽음**: `BuildPrompts`가 세션 파일을 시간순 정렬할 때 `sessionStartTimestamp(files[i])`를 비교 함수 **안에서** 호출 — `sort.Slice`는 O(n log n)번 비교 함수를 호출하므로 파일 하나당 여러 번 재파싱됨. 정렬 전에 타임스탬프를 한 번씩만 계산해 캐싱하도록 수정.
+2. **조기 종료가 안 되는 iterator**: `iterRecords`가 콜백 기반(push-style)이라 `sessionStartTimestamp`/`FindCwdField`처럼 "첫 값만 필요한" 호출도 파일 전체를 끝까지 읽었음(Python은 제너레이터라 `for rec in _iter_records(path): return ts`가 자연스럽게 즉시 멈춤). `yield` 콜백이 `bool`을 반환해 `false`면 스캔을 중단하도록 변경.
+3. **`encoding/json.Decoder`의 이중 스캔 비용**: `tool_use` 인자의 키 순서를 보존하려고 `Decoder.Token()`을 재귀적으로 쓴 게 Go 표준 라이브러리의 알려진 함정이었음 — `Token()`/`Decode()`는 호출마다 남은 스트림 전체를 `checkValid`로 재검증함(pprof에서 `checkValid`+`skip`+`stateInString`이 CPU의 85%+ 차지). 순수 바이트 스캔으로 top-level 키 순서만 뽑고(`scanTopLevelKeyOrder`), 값 디코딩은 `encoding/json` 대신 **`github.com/goccy/go-json`**(드롭인 호환, 훨씬 빠른 서드파티 구현)로 교체.
+
+**결과**: 4.4s → 1.6s(버그 1·2) → 0.62s(버그 3, goccy/go-json). `go test ./...` 전체 재통과(테스트 시간도 15s→2.5s로 같이 줄어듦), markup/토큰/백업 등 기존 검증 전부 그대로 유효.
+
+### 최종 비교 수치 (이 머신, 실제 데이터, `/usr/bin/time -v`)
+
+| 항목 | Go | Python | 비고 |
+|---|---|---|---|
+| `apl --all` 전체 로딩(16개 프로젝트, 104M, 실측) wall-clock | **0.62s** | 0.87s | Go가 약 30% 빠름 |
+| 위 작업 CPU 시간(user+sys) | 0.9s | 0.86s | 비슷함(Go는 GC 등으로 여러 코어 씀, 145%대 CPU) |
+| 위 작업 최대 메모리(RSS) | **15~17MB** | 30MB | Go가 약 절반 |
+| `apl --help` 프로세스 시작 시간(10회 평균) | **7.3ms** | 43.3ms | Go가 약 6배 빠름(인터프리터 기동 오버헤드 없음) |
+| 배포 바이너리/런타임 크기 | 5.8MB 단일 바이너리 | 16MB(venv, Python 인터프리터+의존성 별도 필요) | |
+
+결론: 초기 구현은 실제로 Go가 더 느렸지만(표준 라이브러리 JSON 스트리밍 오용 + 알고리즘 버그), 근본 원인을 고치고 나니 시작 속도·메모리·데이터 로딩 전부 Go가 앞섬 — plan.md §5의 원래 설계 근거가 사후적으로 검증됨.

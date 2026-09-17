@@ -6,124 +6,174 @@ package model
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 
+	json "github.com/goccy/go-json"
+
 	"github.com/cheoljoo/ai-prompt-log/internal/source"
 )
 
 var commandRE = regexp.MustCompile(`(?s)<command-name>\s*(.*?)\s*</command-name>`)
 
-// KV is one ordered key/value pair from a JSON object (Go maps don't
-// preserve key order, but tool_use arguments should render in the order
-// Claude Code emitted them).
+// KV is one ordered key/value pair from a JSON object's top level (Go maps
+// don't preserve key order, but tool_use arguments should render in the
+// order Claude Code emitted them).
+//
+// Only the top level is order-preserving: we use encoding/json.Decoder's
+// Token() exactly once per key to learn the key order, then decode each
+// value in one shot with the standard (fast) Unmarshal path. An earlier
+// version called Token() recursively at every nesting level, which was ~5x
+// slower than the Python implementation on real data -- Token() re-validates
+// the whole remaining stream on every call, which is fine for a handful of
+// top-level keys but very expensive once applied to every nested list/dict
+// inside a large tool argument (see agents/D-go-release.md). Nested object
+// keys below the top level fall back to Go's normal (unordered, alphabetized
+// for determinism in PyRepr) map handling -- a deliberate, minor fidelity
+// tradeoff for a large, real performance win.
 type KV struct {
 	Key   string
-	Value OrderedValue
+	Value interface{}
 }
 
-// OrderedValue is a JSON value decoded while preserving object key order at
-// every nesting level.
-type OrderedValue struct {
-	Kind   string // "string" | "number" | "bool" | "null" | "array" | "object"
-	Str    string
-	Num    json.Number
-	Bool   bool
-	Array  []OrderedValue
-	Object []KV
-}
-
-func decodeOrderedValue(dec *json.Decoder) (OrderedValue, error) {
-	tok, err := dec.Token()
-	if err != nil {
-		return OrderedValue{}, err
-	}
-	switch t := tok.(type) {
-	case json.Delim:
-		switch t {
-		case '{':
-			var obj []KV
-			for dec.More() {
-				keyTok, err := dec.Token()
-				if err != nil {
-					return OrderedValue{}, err
+// scanTopLevelKeyOrder returns a top-level JSON object's key order by
+// scanning raw bytes directly, with no encoding/json involved. Not a
+// general JSON validator -- raw is assumed already-valid JSON, which
+// decodeOrderedTopLevel separately confirms via json.Unmarshal.
+//
+// This exists because encoding/json's streaming Decoder (Token()/Decode())
+// re-validates the whole remaining buffer on every single call, which is
+// fine for a few dozen calls but ~5x slower than Python's json.loads() once
+// applied per key across every tool_use argument in a real session log (see
+// agents/D-go-release.md). A plain byte scan just to learn key order, paired
+// with json.Unmarshal's fast non-streaming path for the actual values,
+// avoids that entirely.
+func scanTopLevelKeyOrder(raw []byte) []string {
+	var keys []string
+	depth := 0
+	expectKey := false
+	for i := 0; i < len(raw); i++ {
+		switch c := raw[i]; c {
+		case '{', '[':
+			depth++
+			if c == '{' && depth == 1 {
+				expectKey = true
+			}
+		case '}', ']':
+			depth--
+		case ',':
+			if depth == 1 {
+				expectKey = true
+			}
+		case '"':
+			start := i
+			i++
+			for i < len(raw) && raw[i] != '"' {
+				if raw[i] == '\\' {
+					i++
 				}
-				key, _ := keyTok.(string)
-				val, err := decodeOrderedValue(dec)
-				if err != nil {
-					return OrderedValue{}, err
+				i++
+			}
+			if i < len(raw) {
+				i++ // include closing quote
+			}
+			if depth == 1 && expectKey {
+				var key string
+				if err := json.Unmarshal(raw[start:i], &key); err == nil {
+					keys = append(keys, key)
 				}
-				obj = append(obj, KV{Key: key, Value: val})
+				expectKey = false
 			}
-			if _, err := dec.Token(); err != nil { // consume '}'
-				return OrderedValue{}, err
-			}
-			return OrderedValue{Kind: "object", Object: obj}, nil
-		case '[':
-			var arr []OrderedValue
-			for dec.More() {
-				val, err := decodeOrderedValue(dec)
-				if err != nil {
-					return OrderedValue{}, err
-				}
-				arr = append(arr, val)
-			}
-			if _, err := dec.Token(); err != nil { // consume ']'
-				return OrderedValue{}, err
-			}
-			return OrderedValue{Kind: "array", Array: arr}, nil
+			i-- // outer loop will i++
 		}
-	case string:
-		return OrderedValue{Kind: "string", Str: t}, nil
-	case json.Number:
-		return OrderedValue{Kind: "number", Num: t}, nil
-	case bool:
-		return OrderedValue{Kind: "bool", Bool: t}, nil
-	case nil:
-		return OrderedValue{Kind: "null"}, nil
 	}
-	return OrderedValue{Kind: "null"}, nil
+	return keys
 }
 
-// PyRepr renders v the way Python's repr() would for a dict/list value.
-func PyRepr(v OrderedValue) string {
-	switch v.Kind {
-	case "string":
-		return "'" + strings.ReplaceAll(v.Str, "'", "\\'") + "'"
-	case "number":
-		return v.Num.String()
-	case "bool":
-		if v.Bool {
+// decodeOrderedTopLevel decodes a JSON object, preserving the order of its
+// top-level keys.
+func decodeOrderedTopLevel(raw json.RawMessage) []KV {
+	if len(raw) == 0 {
+		return nil
+	}
+	var byKey map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &byKey); err != nil {
+		return nil
+	}
+	keys := scanTopLevelKeyOrder(raw)
+	kv := make([]KV, 0, len(keys))
+	seen := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		if seen[k] {
+			continue // duplicate key: keep first occurrence, like Python dict literals
+		}
+		seen[k] = true
+		rawVal, ok := byKey[k]
+		if !ok {
+			continue
+		}
+		var val interface{}
+		// A fresh Decoder scoped to just this one (typically small) value
+		// keeps numbers as json.Number (exact source formatting, matching
+		// Python's repr more closely than float64 would) without the
+		// pathological slowdown of Decode() on a long-lived shared stream.
+		dec := json.NewDecoder(bytes.NewReader(rawVal))
+		dec.UseNumber()
+		if err := dec.Decode(&val); err != nil {
+			continue
+		}
+		kv = append(kv, KV{Key: k, Value: val})
+	}
+	return kv
+}
+
+// PyRepr renders v (a value produced by encoding/json's standard decoder:
+// string, json.Number, bool, nil, []interface{}, or map[string]interface{})
+// the way Python's repr() would for a dict/list value.
+func PyRepr(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return "None"
+	case string:
+		return "'" + strings.ReplaceAll(t, "'", "\\'") + "'"
+	case json.Number:
+		return t.String()
+	case bool:
+		if t {
 			return "True"
 		}
 		return "False"
-	case "null":
-		return "None"
-	case "array":
-		parts := make([]string, len(v.Array))
-		for i, e := range v.Array {
+	case []interface{}:
+		parts := make([]string, len(t))
+		for i, e := range t {
 			parts[i] = PyRepr(e)
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
-	case "object":
-		parts := make([]string, len(v.Object))
-		for i, kv := range v.Object {
-			parts[i] = "'" + kv.Key + "': " + PyRepr(kv.Value)
+	case map[string]interface{}:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, len(keys))
+		for i, k := range keys {
+			parts[i] = "'" + k + "': " + PyRepr(t[k])
 		}
 		return "{" + strings.Join(parts, ", ") + "}"
+	default:
+		return fmt.Sprintf("%v", t)
 	}
-	return ""
 }
 
 // FormatTopLevel renders v the way Python's str() would: unquoted for a
 // plain string, repr-style for anything else.
-func FormatTopLevel(v OrderedValue) string {
-	if v.Kind == "string" {
-		return v.Str
+func FormatTopLevel(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
 	}
 	return PyRepr(v)
 }
@@ -191,10 +241,10 @@ type rawMessage struct {
 }
 
 type rawUsage struct {
-	InputTokens             int64 `json:"input_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens    int64 `json:"cache_read_input_tokens"`
-	OutputTokens            int64 `json:"output_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
 }
 
 type rawRecord struct {
@@ -215,7 +265,13 @@ type rawBlock struct {
 	Input json.RawMessage `json:"input"`
 }
 
-func iterRecords(path string, yield func(rawRecord)) {
+// iterRecords calls yield for each record in path, in file order. yield
+// returns false to stop early (mirroring Python's generator-based
+// _iter_records, where a `for ... return` inside the loop closes the file
+// and stops reading immediately) -- without this, callers that only need
+// e.g. the first timestamp would otherwise scan an entire multi-megabyte
+// session file for nothing.
+func iterRecords(path string, yield func(rawRecord) bool) {
 	f, err := os.Open(path)
 	if err != nil {
 		return
@@ -232,7 +288,9 @@ func iterRecords(path string, yield func(rawRecord)) {
 		if err := json.Unmarshal(line, &rec); err != nil {
 			continue
 		}
-		yield(rec)
+		if !yield(rec) {
+			return
+		}
 	}
 }
 
@@ -270,14 +328,7 @@ func extractAssistantBlocks(rec rawRecord) []AssistantBlock {
 				out = append(out, AssistantBlock{Kind: "text", Text: b.Text})
 			}
 		case "tool_use":
-			var kv []KV
-			if len(b.Input) > 0 {
-				dec := json.NewDecoder(bytes.NewReader(b.Input))
-				dec.UseNumber()
-				if ov, err := decodeOrderedValue(dec); err == nil && ov.Kind == "object" {
-					kv = ov.Object
-				}
-			}
+			kv := decodeOrderedTopLevel(b.Input)
 			out = append(out, AssistantBlock{Kind: "tool_use", ToolName: b.Name, ToolInput: kv})
 		}
 	}
@@ -299,7 +350,7 @@ func ParseSessionFile(path string) []Prompt {
 	var current *Prompt
 	sessionID := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 
-	iterRecords(path, func(rec rawRecord) {
+	iterRecords(path, func(rec rawRecord) bool {
 		if userText, ok := isPromptBoundary(rec); ok {
 			sid := rec.SessionID
 			if sid == "" {
@@ -317,16 +368,19 @@ func ParseSessionFile(path string) []Prompt {
 			current.Blocks = append(current.Blocks, extractAssistantBlocks(rec)...)
 			current.TotalTokens += usageTokens(rec)
 		}
+		return true
 	})
 	return prompts
 }
 
 func sessionStartTimestamp(path string) string {
 	ts := ""
-	iterRecords(path, func(rec rawRecord) {
-		if ts == "" && rec.Timestamp != "" {
+	iterRecords(path, func(rec rawRecord) bool {
+		if rec.Timestamp != "" {
 			ts = rec.Timestamp
+			return false
 		}
+		return true
 	})
 	return ts
 }
@@ -336,12 +390,24 @@ func sessionStartTimestamp(path string) string {
 // trusted within a session, see docs/data-model.md).
 func BuildPrompts(projectDir string) []Prompt {
 	files := source.ListSessionFiles(projectDir)
-	sort.Slice(files, func(i, j int) bool {
-		return sessionStartTimestamp(files[i]) < sessionStartTimestamp(files[j])
+	// Compute each file's start timestamp once up front -- sort.Slice's
+	// comparator can invoke itself far more than len(files) times during an
+	// O(n log n) sort, and recomputing sessionStartTimestamp (a file read)
+	// inside it turns one file scan into many.
+	timestamps := make([]string, len(files))
+	for i, f := range files {
+		timestamps[i] = sessionStartTimestamp(f)
+	}
+	order := make([]int, len(files))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool {
+		return timestamps[order[i]] < timestamps[order[j]]
 	})
 	var prompts []Prompt
-	for _, f := range files {
-		prompts = append(prompts, ParseSessionFile(f)...)
+	for _, idx := range order {
+		prompts = append(prompts, ParseSessionFile(files[idx])...)
 	}
 	return prompts
 }
@@ -349,10 +415,12 @@ func BuildPrompts(projectDir string) []Prompt {
 func FindCwdField(projectDir string) string {
 	for _, f := range source.ListSessionFiles(projectDir) {
 		cwd := ""
-		iterRecords(f, func(rec rawRecord) {
-			if cwd == "" && rec.Cwd != "" {
+		iterRecords(f, func(rec rawRecord) bool {
+			if rec.Cwd != "" {
 				cwd = rec.Cwd
+				return false
 			}
+			return true
 		})
 		if cwd != "" {
 			return cwd
