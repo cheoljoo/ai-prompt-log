@@ -1,6 +1,6 @@
 [project]
 name = "apl"
-version = "0.2.2"
+version = "0.2.3"
 description = "tig-style terminal viewer for Claude Code session logs (~/.claude/projects/**/*.jsonl)"
 license = "Apache-2.0"
 requires-python = ">=3.9"
