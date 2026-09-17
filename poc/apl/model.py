@@ -31,6 +31,7 @@ class Prompt:
     sidechain: bool
     user_text: str
     blocks: list = field(default_factory=list)  # list[AssistantBlock]
+    total_tokens: int = 0
 
     @property
     def is_command(self) -> bool:
@@ -104,6 +105,16 @@ def _extract_assistant_blocks(rec: dict) -> list:
     return out
 
 
+def _usage_tokens(rec: dict) -> int:
+    usage = rec.get("message", {}).get("usage")
+    if not isinstance(usage, dict):
+        return 0
+    return sum(
+        usage.get(k) or 0
+        for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+    )
+
+
 def parse_session_file(path: Path) -> list:
     """Return Prompts found in a single session jsonl, in file order."""
     prompts: list = []
@@ -121,6 +132,7 @@ def parse_session_file(path: Path) -> list:
             prompts.append(current)
         elif rec.get("type") == "assistant" and current is not None:
             current.blocks.extend(_extract_assistant_blocks(rec))
+            current.total_tokens += _usage_tokens(rec)
     return prompts
 
 

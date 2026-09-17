@@ -81,6 +81,10 @@
 
 `ai-prompt-log/agents/`처럼 프로젝트 하위 디렉터리에서 `apl`을 실행하면 로그가 하나도 안 보였음 — Claude Code 세션은 보통 프로젝트 루트에서 시작되지 하위 디렉터리에서 시작되지 않는데, direct 모드가 **정확히 지금 cwd**만 `~/.claude/projects`에서 찾고 있었기 때문. `git status`처럼 상위 디렉터리로 올라가며 로그가 있는 가장 가까운 조상을 찾도록 `source.find_direct_project_dir()` 추가. `agents/`, `poc/`, `poc/apl/`, `docs/` 등에서 실행해도 부모 프로젝트(`ai-prompt-log`)의 실제 로그가 정확히 조회됨을 확인, 진짜로 관련 없는 디렉터리(`/tmp`)는 여전히 빈 상태로 남는 것도 확인.
 
+## Prompt별 토큰 사용량 표시
+
+`assistant` 레코드의 `message.usage`(input/cache_creation/cache_read/output tokens)를 Prompt별로 합산해 `Prompt.total_tokens`에 저장, Prompts pane에 "Tokens" 컬럼(예: `30.3M`)으로 표시하고 Detail pane 헤더에도 표시. 실제 이 세션 데이터(18개 prompt)로 검증 — 캐시 생성 비중이 커서 긴 대화의 prompt는 수백만~수천만 토큰까지 나옴(예: 큰 도구 호출이 많은 turn은 30.3M).
+
 ## 알려진 POC 한계 (Agent C/D에서 다룰 것)
 - `/` 검색, 날짜/브랜치/source 필터, 통계 화면, export, `--since`/`--tail`, 세션 재개(`--resume`) 표시 — plan.md §7에서 반영하기로 한 기능들은 아직 미구현(POC는 최소 골격만)
 - `thinking` 블록은 항상 숨김(토글 없음)

@@ -63,6 +63,20 @@ Claude Code는 이미 세션마다 prompt/응답을 다음 위치에 JSONL로 �
 
 이제 "llm_wiki에서 실행해야 3단계가 보인다"는 제약이 없다 — `apl --all`은 어느 디렉터리에서 실행해도 동일하게 동작한다. 여러 머신 이동성이 필요하면 그냥 각 머신에서 `apl --all`을 실행하면 되고(원본 데이터는 항상 그 머신의 `~/.claude/projects`), 별도 동기화 메커니즘은 두지 않는다(범위 밖).
 
+### 2-1a. `apl --backup` — 프로젝트 삭제에도 살아남는 내구성 백업 (Agent F)
+
+§2-1에서 "복사/캐시는 없앤다"고 결정한 건 **3단계 보기**(`--all`) 용도였다. 그런데 별도 문제가 있다: 세션 로그는 오직 `~/.claude/projects/<encoded-cwd>/`에만 있고, 그 프로젝트 디렉터리를 지워버리면(=Claude Code가 더는 그 경로로 `cwd`를 기록할 일이 없어지면) 그 프로젝트에서 뭘 했는지 되짚어볼 방법이 없어진다. 이건 "매번 최신 상태를 3단계로 보여주는" 문제가 아니라 "언젠가 사라질 수도 있는 프로젝트의 기록을 지금 안전한 곳에 복사해둔다"는 별개의 문제이므로, §2-1의 "복사 없음" 원칙과 모순되지 않는 **세 번째 모드**로 추가한다.
+
+- `apl --backup [--depth N] [--backup-dir PATH]`
+  - `--depth` 생략: 현재 프로젝트(§2-1의 "가장 가까운 조상" 판정과 동일) 하나만 백업
+  - `--depth N`: cwd에서 N단계 위 디렉터리를 root로 삼아, 그 root와 같거나 그 하위인 **실제 `cwd`**를 가진 모든 프로젝트를 백업(인코딩된 디렉터리명은 손실 인코딩이라 역디코딩하지 않고, 각 jsonl 레코드의 `cwd` 필드를 신뢰한다 — §1과 동일한 원칙)
+  - 기본 백업 위치: `~/ai-prompt-log.backup/`(홈 디렉터리, 어떤 프로젝트에도 속하지 않음, git-ignore 대상 아님) — 특정 프로젝트가 지워져도 이 디렉터리는 영향받지 않음
+  - 레이아웃은 `~/.claude/projects/<encoded-cwd>/*.jsonl`과 동일하게 미러링 — 덕분에 `model.py`의 기존 파싱 코드를 변경 없이 그대로 재사용 가능(`project_dir`/`aggregate_root`만 백업 디렉터리로 바꿔치면 됨)
+  - 복사 로직은 폐기된 `apl sync`(mtime+size 기반 증분 복사, `git show c7200c4:poc/apl/sync.py`)를 그대로 재사용하되 **삭제는 절대 하지 않는다** — sync.py는 "최신 상태만 유지하는 캐시"였지만 이건 "지나간 것도 계속 보존하는 append-only 아카이브"라는 점이 유일한 의도적 차이
+- `apl --view-backup [--backup-dir PATH]` — 기존 3단계(aggregate) TUI를 그대로 재사용하되 루트만 `~/.claude/projects` 대신 백업 디렉터리로 지정(`source.detect_mode()`에 `root_override` 추가로 구현, 모델/파싱 로직 변경 없음)
+
+자세한 계약·검증 로그는 `agents/F-backup.md` 참조.
+
 ## 3. UX / 화면 설계
 
 **(v0.1 실사용 피드백으로 재설계됨 — 최초안은 화면 전체를 push/pop하는 Screen 전환 방식이었으나, "화면 전환 대신 나눠서 보여달라"는 피드백에 따라 아래처럼 분할 화면(pane) 방식으로 바뀜. 자세한 변경 이력은 `agents/B-poc.md`.)**
@@ -110,6 +124,20 @@ Claude Code는 이미 세션마다 prompt/응답을 다음 위치에 JSONL로 �
 | 배포 | 사내 개발용, `uv tool install` 정도 | `go install`, 정적 바이너리 배포, 추후 homebrew/apt 패키징 여지 |
 
 **권장 진행 방식**: POC(Python)로 3단계 뷰 + 색상 + 키바인딩 + 실제 `~/.claude/projects` 데이터로 검증까지 끝낸 뒤, 검증된 데이터 모델/UX를 그대로 Go로 이식. Parse 로직(JSONL → Prompt 모델)이 핵심 자산이므로 POC 단계에서 이 부분의 스펙(§2)을 문서로 고정해두면 이식이 기계적으로 된다.
+
+### 5-1. 배포 전략 — 결정됨
+
+"바이너리 배포 가능한가, `apt install`처럼 쓸 수 있나?"라는 질문에 대한 결론:
+
+| 방식 | 채택 여부 | 이유 |
+|---|---|---|
+| 공식 Ubuntu/Debian 저장소(`apt install apl`) | **채택 안 함** | Debian 패키징 규정·메인테이너 스폰서십·심사 절차가 필요한 몇 달~몇 년짜리 과정 — 개인 프로젝트로 현실적이지 않음 |
+| 직접 만든 APT 저장소 | **채택 안 함** | 서명 키/인덱스 파일을 계속 직접 유지보수해야 함 — 배보다 배꼽이 큼 |
+| GitHub Release에 `.deb`/`.rpm` 첨부 | **채택** | `apt install`은 아니지만 `dpkg -i`/`rpm -i` 한 줄로 설치 가능. GoReleaser가 자동 생성 |
+| **Homebrew**(`brew install`) | **채택, 우선순위 1순위** | macOS + Linux(Linuxbrew) 둘 다 지원, `tig`/`lazygit`/`gh`와 동일한 배포 방식, 심사 불필요(개인 tap) |
+| `go install .../cmd/apl@latest` | **채택**(부가) | Go 유저는 저장소 공개 즉시 바로 가능, 추가 작업 없음 |
+
+**도구**: [GoReleaser](https://goreleaser.com/)로 git 태그(예: `v0.2.0`) 하나에 Linux/macOS/Windows 바이너리 + `.deb`/`.rpm` + Homebrew formula + GitHub Release 업로드를 전부 자동화한다. Homebrew는 별도 **tap 저장소**(예: `cheoljoo/homebrew-apl`)가 필요하며, GoReleaser가 릴리스마다 그 저장소의 formula 파일을 자동 갱신하도록 설정한다.
 
 ## 6. 리스크 / 미해결 이슈
 
@@ -165,12 +193,18 @@ Claude Code는 이미 세션마다 prompt/응답을 다음 위치에 JSONL로 �
 - **Result**: `docs/poc-feedback.md` — 발견된 버그/UX 이슈/성능 이슈 목록과 Release 단계에서 고쳐야 할 항목.
 
 ### Agent D — Go Release 구현
-- **Intent**: Agent A 스펙 + Agent C 피드백을 반영해 Go(bubbletea/lipgloss)로 재구현. 스트리밍 파싱 + 캐시 인덱스 포함. 단일 바이너리 `apl` 빌드.
-- **Result**: `cmd/apl` 빌드 산출물, `make build`/`go install` 경로, README 사용법 갱신. 실제 데이터로 POC와 동일한 golden path 재확인.
+- **Intent**: Agent A 스펙(`docs/data-model.md`) + Python POC(`poc/apl/`)의 검증된 동작을 Go(bubbletea/lipgloss/bubbles)로 이식. `apl`/`apl --all`/`apl --help` 기능·vi 키바인딩 동일하게 구현. 단일 정적 바이너리 빌드.
+- **Result**: `cmd/apl` 빌드 산출물, 실제 데이터로 Python POC와 동일한 golden path(direct 2-pane, aggregate 3-pane, 실시간 갱신) 재확인.
+- **상태: 완료.** `go test ./internal/tui/...`가 실제 데이터로 검증: direct 모드 18개 prompt, aggregate 모드 실제 프로젝트 16개(디렉터리 개수와 정확히 일치), j/k/g/G/Tab/Shift+Tab/Enter/Esc/Ctrl+F/B/D/U 전부 통과. Textual의 "smart escape" 버그(agents/B-poc.md)는 애초에 Go/lipgloss엔 마크업 파서 자체가 없어(스타일은 직접 문자열에 ANSI를 입히는 방식) 이 버그 클래스가 원천적으로 발생하지 않음. tool_use 인자는 Go map이 키 순서를 보존하지 않는 문제를 토큰 단위 순서 보존 JSON 디코더(`internal/model`의 `OrderedValue`)로 직접 해결해 Python과 동일한 순서로 렌더링. 자세한 내용은 `agents/D-go-release.md`.
 
-### Agent E — 패키징 & 문서화
-- **Intent**: README.md에 설치법/사용법/키바인딩 표 반영, `security-review` 스킬로 로그 파일(개인정보 포함 가능) 접근 범위 점검(읽기 전용, 외부 전송 없음 확인).
-- **Result**: 배포 가능한 README + 보안 점검 결과. 여기서 이슈 없으면 v1 완료.
+### Agent E — 패키징 & 배포 (§5-1)
+- **Intent**: GoReleaser 설정(`.goreleaser.yaml`)으로 태그 기반 크로스플랫폼 빌드 자동화. Homebrew tap 저장소 생성 및 formula 자동 갱신 연결. README.md에 `brew install` 안내 반영. `security-review` 스킬로 로그 파일(개인정보 포함 가능) 접근 범위 점검(읽기 전용, 외부 전송 없음 확인).
+- **Result**: `brew install cheoljoo/apl/apl`로 설치 가능, GitHub Release에 크로스플랫폼 바이너리 + `.deb`/`.rpm` 첨부. 여기서 이슈 없으면 v1 완료.
+- **상태: 진행 중** — 다음 단계.
+
+### Agent F — `apl --backup` (§2-1a)
+- **Intent/Result/검증 로그**: `agents/F-backup.md` 참조.
+- **상태: 완료.**
 
 ## 9. 활용 skill
 
@@ -180,38 +214,38 @@ Claude Code는 이미 세션마다 prompt/응답을 다음 위치에 JSONL로 �
 - **init**: 필요 시 프로젝트 CLAUDE.md 초기화(현재는 없음, 필요해지면 사용)
 - **process-intent 방식 준용**(§8-0): 별도 스킬 호출은 아니지만, 이 프로젝트 자체가 이미 `process-intent`/`herdr-intent` 스킬이 쓰는 "intent/spec/plan 파일화" 관례를 그대로 따름
 
-## 10. 제안 디렉터리 구조
+## 10. 디렉터리 구조 (실제)
 
 ```
 ai-prompt-log/
   plan.md                 (본 문서)
+  llms.txt                 (AI/크롤러용 프로젝트 요약, §7)
   agents/                  (§8-0, 단계별 계약서 파일)
     A-data-model.md
     B-poc.md
-    C-poc-review.md
     D-go-release.md
-    E-packaging.md
+    F-backup.md
   docs/
     data-model.md          (Agent A 결과물)
-    poc-feedback.md         (Agent C 결과물)
-  poc/                      (Agent B, Python)
+  poc/                      (Agent B, Python — pip/uv로 설치되는 배포 단위)
     pyproject.toml
     apl/
       __init__.py
-      cli.py                (argparse: --all/-a, --help)
-      source.py             (jsonl 스캔, direct/aggregate 모드 판단)
-      model.py              (Project/Prompt 정규화)
-      tui.py                (Textual 앱, 2/3단계 뷰 전환)
+      cli.py                (argparse: --all/-a, --backup, --view-backup, --help)
+      source.py             (jsonl 스캔, direct/aggregate 모드 판단, root_override)
+      model.py              (Project/Prompt 정규화, token 사용량 집계)
+      tui.py                (Textual 앱, 2/3단계 분할 pane 뷰)
+      backup.py             (Agent F, §2-1a: depth 기반 증분 백업)
   cmd/apl/                  (Agent D, Go release)
-    main.go
-  internal/
-    source/                 (jsonl 스캔, 스트리밍 파싱)
-    model/
-    tui/                    (bubbletea)
-  Makefile
+    main.go                 (flag 파싱: --all/-a, --help)
+  internal/                 (Agent D)
+    source/                 (jsonl 스캔, direct/aggregate 모드 판단 — poc/apl/source.py와 1:1 대응)
+    model/                  (Project/Prompt 정규화, tool_use 인자 순서 보존 JSON 디코더)
+    tui/                    (bubbletea/lipgloss/bubbles, 2/3단계 분할 pane 뷰 + tui_test.go)
+  go.mod / go.sum
   README.md
 ```
 
 ## 11. 다음 액션
 
-이 plan.md에 동의하면 **Agent A(데이터 모델 조사)** 부터 시작한다 — 시작 전에 `agents/A-data-model.md` 계약서 파일부터 만든다(§8-0). Agent A 없이 바로 POC로 가면 파싱 규칙이 코드 여기저기 흩어져 Go 이식 때 재조사해야 하므로, 순서를 지키는 걸 권장한다.
+Agent A/B/D/F 완료. 남은 건 **Agent E(패키징 & 배포)** — GoReleaser 설정, Homebrew tap 저장소, `.deb`/`.rpm`, README `brew install` 안내.

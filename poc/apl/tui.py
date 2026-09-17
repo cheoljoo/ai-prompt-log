@@ -57,6 +57,16 @@ def _recency_style(ts: str) -> str:
     return "dim"
 
 
+def _format_tokens(n: int) -> str:
+    if n <= 0:
+        return "-"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
 def format_prompt_detail(prompt: model.Prompt) -> str:
     """Human-readable, indented rendering of one prompt + its AI result.
 
@@ -67,6 +77,8 @@ def format_prompt_detail(prompt: model.Prompt) -> str:
     meta = [f"[dim]{escape(prompt.timestamp)}[/dim]"]
     if prompt.branch:
         meta.append(f"[magenta]{escape(prompt.branch)}[/magenta]")
+    if prompt.total_tokens:
+        meta.append(f"[blue]{escape(_format_tokens(prompt.total_tokens))} tokens[/blue]")
     if prompt.sidechain:
         meta.append(f"[yellow]{escape('[subagent]')}[/yellow]")
 
@@ -148,6 +160,7 @@ class AplScreen(Screen):
         prompts_table.cursor_type = "row"
         prompts_table.add_column("Date")
         prompts_table.add_column("Branch")
+        prompts_table.add_column("Tokens")
         prompts_table.add_column("Tag")
         prompts_table.add_column("Summary")
         prompts_table.border_title = "Prompts"
@@ -189,6 +202,7 @@ class AplScreen(Screen):
             table.add_row(
                 Text(p.timestamp[:19] or "-", style="dim"),
                 Text(p.branch or "-", style="magenta"),
+                Text(_format_tokens(p.total_tokens), style="blue"),
                 Text(tag, style="yellow"),
                 Text(p.summary),
                 key=str(idx),
@@ -305,9 +319,11 @@ class AplApp(App):
     }
     """
 
-    def __init__(self, aggregate: bool = False):
+    def __init__(self, aggregate: bool = False, root_override: Path | None = None):
         super().__init__()
-        self.mode, self.root_dir = source.detect_mode(Path.cwd(), aggregate=aggregate)
+        self.mode, self.root_dir = source.detect_mode(
+            Path.cwd(), aggregate=aggregate, root_override=root_override
+        )
 
     def on_mount(self) -> None:
         self.push_screen(AplScreen(self.mode, self.root_dir))

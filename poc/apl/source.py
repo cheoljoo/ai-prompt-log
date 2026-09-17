@@ -31,14 +31,20 @@ def find_direct_project_dir(cwd: Path) -> Path:
     return CLAUDE_PROJECTS_DIR / encode_path(cur)
 
 
-def detect_mode(cwd: Path, aggregate: bool = False):
+def detect_mode(cwd: Path, aggregate: bool = False, root_override: Path | None = None):
     """Return (mode, project_root_dir).
 
     mode == "aggregate": project_root_dir holds one subdir per project
-        (~/.claude/projects itself) -> 3-level view, read directly, no copy.
+        (~/.claude/projects itself, or root_override) -> 3-level view.
     mode == "direct": project_root_dir is the nearest ancestor's session
         directory (may not exist if truly nothing was ever logged) -> 2-level view.
+
+    root_override lets a caller point the aggregate 3-pane view at a
+    directory laid out like ~/.claude/projects but that isn't it -- e.g.
+    `apl --view-backup`'s backup directory (see backup.py).
     """
+    if root_override is not None:
+        return "aggregate", root_override
     if aggregate:
         return "aggregate", CLAUDE_PROJECTS_DIR
     return "direct", find_direct_project_dir(cwd)

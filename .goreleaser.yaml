@@ -1,0 +1,75 @@
+version: 2
+
+project_name: apl
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: apl
+    main: ./cmd/apl
+    binary: apl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: apl
+    ids: [apl]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: "checksums.txt"
+
+nfpms:
+  - id: apl
+    ids: [apl]
+    package_name: apl
+    vendor: cheoljoo
+    homepage: https://github.com/cheoljoo/ai-prompt-log
+    maintainer: cheoljoo <noreply@users.noreply.github.com>
+    description: >-
+      tig-style terminal viewer for Claude Code session logs
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+
+brews:
+  - name: apl
+    repository:
+      owner: cheoljoo
+      name: homebrew-apl
+    homepage: https://github.com/cheoljoo/ai-prompt-log
+    description: "tig-style terminal viewer for Claude Code session logs"
+    license: Apache-2.0
+    install: |
+      bin.install "apl"
+    test: |
+      system "#{bin}/apl --help"
+
+release:
+  github:
+    owner: cheoljoo
+    name: ai-prompt-log
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

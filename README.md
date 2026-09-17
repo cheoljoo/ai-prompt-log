@@ -5,8 +5,10 @@ A `tig`-style terminal viewer for [**Claude Code**](https://claude.com/claude-co
 > **Compatibility**: built specifically for Claude Code's local session-log format (`~/.claude/projects/**/*.jsonl`), verified against real logs from Claude Code CLI versions in the 2.x line (see [`docs/data-model.md`](docs/data-model.md)). It does not read logs from claude.ai (the web/desktop chat app), the Claude API, or other AI coding tools. This is an independent, unofficial tool — not built or endorsed by Anthropic.
 
 ```
-apl        # this project's own prompts only   -> 2 panes: Prompts | Detail
-apl --all  # every project you've used         -> 3 panes: Projects | Prompts | Detail
+apl               # this project's own prompts only   -> 2 panes: Prompts | Detail
+apl --all         # every project you've used         -> 3 panes: Projects | Prompts | Detail
+apl --backup      # copy session logs to a durable backup dir (survives deleting the project)
+apl --view-backup # browse that backup                -> 3 panes, same as --all
 ```
 
 Panes are shown side by side and update live as you move the cursor — no screen transitions, no need to press Enter just to preview something.
@@ -42,9 +44,22 @@ apl              # browse just this project's prompts (2 panes)
 
 apl --all        # browse every project under ~/.claude/projects (3 panes)
 apl --help       # usage, keybindings, this repo's URL
+
+apl --backup                  # back up just the current project
+apl --backup --depth 1        # + every sibling project under the parent directory
+apl --backup --backup-dir PATH  # use a custom backup location (default: ~/ai-prompt-log.backup/)
+apl --view-backup              # browse a previous --backup (3 panes, like --all)
 ```
 
 `apl` (no flag) walks up from the current directory to find the nearest ancestor that actually has logged sessions — so it also works from a subdirectory of a project, not just its root.
+
+### Backing up session logs
+
+Claude Code only keeps session logs under `~/.claude/projects/<encoded-cwd>/` — delete that project directory and the logs are effectively gone. `apl --backup` copies the relevant `*.jsonl` files into a durable location (`~/ai-prompt-log.backup/` by default, independent of any one project), incrementally (unchanged files are skipped, changed files are updated, **nothing already backed up is ever deleted**).
+
+- `apl --backup` with no `--depth` backs up only the current project (same nearest-ancestor resolution as plain `apl`).
+- `apl --backup --depth N` walks up `N` directories from cwd and backs up *every* project whose real `cwd` (read from the logs themselves, not guessed from the encoded directory name) is that directory or a descendant of it — handy for backing up a whole `~/code/` tree of sibling projects in one go.
+- `apl --view-backup` opens the same 3-pane aggregate view as `apl --all`, but rooted at the backup directory instead of the live `~/.claude/projects`.
 
 ### Keybindings (vi-style)
 
