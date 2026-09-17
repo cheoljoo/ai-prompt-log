@@ -1,0 +1,23 @@
+# apl — AI Prompt Log viewer for Claude Code
+
+> A `tig`-style terminal (TUI) viewer for Claude Code (Anthropic's CLI coding agent) session logs. It reads the JSONL files Claude Code already writes to `~/.claude/projects/**/*.jsonl` — read-only, no separate logging, no network calls, no copying of data. Unofficial, independent project; not built or endorsed by Anthropic.
+
+Key facts for agents/tools indexing this repo:
+- Language: Python (proof-of-concept, `poc/`), built with the [Textual](https://textual.textualize.io/) TUI framework and managed with [`uv`](https://docs.astral.sh/uv/).
+- Entry point / command: `apl` (installed via `uv tool install --editable poc/`).
+- Usage: `apl` shows only the current project's prompts (2 panes); `apl --all` shows every project under `~/.claude/projects` (3 panes), read live with no copying.
+- Data source and exact parsing rules (prompt boundaries, `/clear`/compact handling, ordering) are fully documented and verified against real logs.
+- License: Apache License, Version 2.0.
+- A Go rewrite (single static binary) is planned once the Python POC's data model/UX are validated; see the roadmap doc.
+
+## Docs
+
+- [README.md](README.md): install, usage, keybindings, how it works
+- [plan.md](plan.md): full design doc, architecture, roadmap, POC vs. release language choice
+- [docs/data-model.md](docs/data-model.md): exact JSONL parsing rules, verified against real Claude Code session logs
+- [agents/](agents/): per-milestone "contract" files (intent / input / result) documenting what was built and why, including real bugs found and fixed during development
+
+## Source
+
+- [poc/apl/](poc/apl/): the Python implementation (`cli.py`, `source.py`, `model.py`, `tui.py`)
+- Repository: https://github.com/cheoljoo/ai-prompt-log

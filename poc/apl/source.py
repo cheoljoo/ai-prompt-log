@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-CACHE_DIRNAME = ".ai-prompt-log-cache"
 
 
 def encode_path(path: Path) -> str:
@@ -16,27 +15,33 @@ def encode_path(path: Path) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", str(path))
 
 
-def find_repo_root(start: Path) -> Path:
-    cur = start.resolve()
-    for parent in [cur, *cur.parents]:
-        if (parent / ".git").exists():
-            return parent
-    return cur
+def find_direct_project_dir(cwd: Path) -> Path:
+    """Walk up from cwd to the nearest ancestor with recorded sessions.
+
+    Claude Code logs sessions under the exact directory it was launched
+    from - usually a project's root - not every subdirectory you `cd`
+    into afterwards. Without this, running `apl` from e.g. `agents/`
+    would show nothing even though the parent project has logs.
+    """
+    cur = cwd.resolve()
+    for candidate in (cur, *cur.parents):
+        d = CLAUDE_PROJECTS_DIR / encode_path(candidate)
+        if d.is_dir():
+            return d
+    return CLAUDE_PROJECTS_DIR / encode_path(cur)
 
 
-def detect_mode(cwd: Path):
+def detect_mode(cwd: Path, aggregate: bool = False):
     """Return (mode, project_root_dir).
 
-    mode == "aggregate": project_root_dir holds one subdir per project (mirrors
-        the ~/.claude/projects layout) -> 3-level view.
-    mode == "direct": project_root_dir is this project's own session directory
-        (may not exist yet) -> 2-level view.
+    mode == "aggregate": project_root_dir holds one subdir per project
+        (~/.claude/projects itself) -> 3-level view, read directly, no copy.
+    mode == "direct": project_root_dir is the nearest ancestor's session
+        directory (may not exist if truly nothing was ever logged) -> 2-level view.
     """
-    root = find_repo_root(cwd)
-    cache_dir = root / CACHE_DIRNAME
-    if cache_dir.is_dir():
-        return "aggregate", cache_dir
-    return "direct", CLAUDE_PROJECTS_DIR / encode_path(cwd.resolve())
+    if aggregate:
+        return "aggregate", CLAUDE_PROJECTS_DIR
+    return "direct", find_direct_project_dir(cwd)
 
 
 def list_session_files(project_dir: Path) -> list[Path]:

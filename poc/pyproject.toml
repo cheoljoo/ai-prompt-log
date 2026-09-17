@@ -1,11 +1,36 @@
 [project]
 name = "apl"
 version = "0.1.0"
-description = "AI Prompt Log viewer - tig-style TUI for Claude Code session logs"
+description = "tig-style terminal viewer for Claude Code session logs (~/.claude/projects/**/*.jsonl)"
+license = "Apache-2.0"
 requires-python = ">=3.9"
+keywords = [
+    "claude-code",
+    "claude",
+    "anthropic",
+    "tui",
+    "textual",
+    "session-log",
+    "jsonl",
+    "tig",
+    "prompt-log",
+    "ai-coding-agent",
+]
+classifiers = [
+    "Environment :: Console",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: Utilities",
+]
 dependencies = [
     "textual>=0.60.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/cheoljoo/ai-prompt-log"
+Documentation = "https://github.com/cheoljoo/ai-prompt-log/blob/main/README.md"
 
 [project.scripts]
 apl = "apl.cli:main"

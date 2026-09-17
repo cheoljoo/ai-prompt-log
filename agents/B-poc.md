@@ -2,9 +2,8 @@
 
 ## Intent
 `docs/data-model.md`를 따라 `uv` 기반 Python(Textual) 프로젝트로 apl POC 구현.
-- 실행 위치에 따라 2단계(direct)/3단계(aggregate) 자동 전환
-- `apl sync` 서브커맨드로 `~/.claude/projects` → 집계 프로젝트(cache 디렉터리) 미러링
-- 색상 구분(USER/ASSISTANT/TOOL/cmd), 기본 키바인딩(enter/escape/q)
+- `apl`(2단계 direct) / `apl --all`(3단계 aggregate) 플래그로 전환 — `~/.claude/projects`를 항상 직접 읽음, 복사/캐시 없음(§2-1, v2에서 캐시 방식 폐기)
+- 색상 구분(USER/ASSISTANT/TOOL/cmd), vi 스타일 키바인딩
 
 ## Input
 - `docs/data-model.md` (Agent A 결과물)
@@ -13,8 +12,8 @@
 ## Result (계약)
 - `poc/` 아래 `uv tool install --editable poc/`로 `apl` 커맨드 설치 가능
 - `apl` 실행 시 현재 프로젝트 자기 것만 2단계로 보임 (직접 검증)
-- 집계 프로젝트(캐시 디렉터리 존재) 안에서는 3단계로 전체 프로젝트가 보임 (직접 검증)
-- `apl sync` 실행 후 캐시 디렉터리에 실제 파일이 미러링됨 (직접 검증)
+- `apl --all` 실행 시 위치와 무관하게 `~/.claude/projects` 전체가 3단계로 보임 (직접 검증)
+- `apl --help`로 사용법·키바인딩·저장소 주소 확인 가능 (직접 검증)
 
 ## 상태: 완료 — 실행 검증 로그
 
@@ -60,6 +59,27 @@
 ## vi 스크롤 키 추가 (`Ctrl+F/B/D/U`)
 
 리스트 pane에서는 커서를 페이지 단위로 이동(전체/절반), detail pane(스크롤 영역)에서는 같은 키로 화면을 페이지/절반 스크롤. `hermes` 프로젝트(prompt 34개, llm_wiki 캐시의 실제 데이터)로 헤드리스 검증: `ctrl+f`(0→18), `ctrl+b`(18→0), `ctrl+d`(0→10), `ctrl+u`(10→0), detail pane에서도 스크롤 위치 변화 확인.
+
+## `apl --help` 지원, command palette 키 변경
+
+- `cli.py`를 `argparse` 기반으로 재작성: `apl --help`/`-h`가 즉시 usage/keybinding 표/오픈소스 git 주소를 출력하고 종료(exit 0). 알 수 없는 옵션(`apl --bogus`)은 TUI를 띄우지 않고 에러(exit 2)로 처리 — 이전엔 인자를 무시하고 그냥 TUI가 떠서 non-interactive 환경에서 멈춰 있었음.
+- **command palette**: Textual이 모든 앱에 기본 제공하는 기능으로, 앱 안에서 실행 가능한 명령(테마 전환, 스크린샷, 종료 등)을 fuzzy 검색으로 찾아 실행하는 팝업(VSCode의 Ctrl+Shift+P와 같은 개념). 기본 키가 `Ctrl+P`인데 Termius와 충돌한다는 피드백에 따라 **`F1`로 변경**(`AplApp.COMMAND_PALETTE_BINDING = "f1"`). `Ctrl+P`는 이제 아무 것도 하지 않음(헤드리스 테스트로 확인).
+
+## `apl sync`/캐시 방식 완전 폐기 → `apl --all`로 교체 (설계 재검토)
+
+바로 위 "부수 발견"(어디서든 `apl sync`를 실행하면 그 저장소가 실수로 aggregate 모드가 됨)을 겪은 뒤, 사용자가 근본적인 질문을 던짐: "3단계 전체 보기 위해 `~/.claude/projects`를 복사할 필요 없이 그냥 읽으면 안 되나?" — 맞는 지적이었음. 캐시가 실제로 해결해주던 문제(머신 이동성)도, 캐시 자체가 git-ignore된 로컬 파일이라 애초에 제대로 해결하지 못하고 있었음.
+
+**변경 사항**:
+- `sync.py` 삭제, `apl sync` 서브커맨드 제거
+- `source.detect_mode(cwd, aggregate: bool)`로 단순화 — 디렉터리 위치가 아니라 **`apl --all`(`-a`) 플래그**로만 2/3단계 결정
+- `apl --all`은 `~/.claude/projects`를 그 자리에서 직접 읽음(복사/캐시 없음, 항상 최신, 실수로 다른 저장소를 오염시킬 여지 자체가 없어짐)
+- `ai-prompt-log`·`llm_wiki` 양쪽에 남아있던 `.ai-prompt-log-cache/`(88M)와 관련 `.gitignore` 항목 정리(삭제)
+
+재검증: `ai-prompt-log` 디렉터리(캐시 없음)에서 `apl --all` 실행 → 실제 `~/.claude/projects` 하위 16개 프로젝트 전부 정상 표시, 프로젝트 개수가 실제 디렉터리 개수와 정확히 일치함을 헤드리스 테스트로 확인. 전체 프로젝트의 실제 prompt 565개에 대해 markup 렌더링도 재검증(0건 실패).
+
+## `apl`이 하위 디렉터리에서 실행되면 아무것도 안 보이던 문제
+
+`ai-prompt-log/agents/`처럼 프로젝트 하위 디렉터리에서 `apl`을 실행하면 로그가 하나도 안 보였음 — Claude Code 세션은 보통 프로젝트 루트에서 시작되지 하위 디렉터리에서 시작되지 않는데, direct 모드가 **정확히 지금 cwd**만 `~/.claude/projects`에서 찾고 있었기 때문. `git status`처럼 상위 디렉터리로 올라가며 로그가 있는 가장 가까운 조상을 찾도록 `source.find_direct_project_dir()` 추가. `agents/`, `poc/`, `poc/apl/`, `docs/` 등에서 실행해도 부모 프로젝트(`ai-prompt-log`)의 실제 로그가 정확히 조회됨을 확인, 진짜로 관련 없는 디렉터리(`/tmp`)는 여전히 빈 상태로 남는 것도 확인.
 
 ## 알려진 POC 한계 (Agent C/D에서 다룰 것)
 - `/` 검색, 날짜/브랜치/source 필터, 통계 화면, export, `--since`/`--tail`, 세션 재개(`--resume`) 표시 — plan.md §7에서 반영하기로 한 기능들은 아직 미구현(POC는 최소 골격만)

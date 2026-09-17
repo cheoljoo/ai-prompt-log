@@ -1,7 +1,9 @@
 """TUI layer: tig-style split-pane navigation (no full-screen transitions).
 
-  aggregate mode: [ Projects | Prompts | Detail ] — 3 panes, live preview
-  direct mode:    [ Prompts | Detail ]             — 2 panes, live preview
+  apl        (direct mode):    [ Prompts | Detail ]             2 panes,
+             this project's own prompts only
+  apl --all  (aggregate mode): [ Projects | Prompts | Detail ]  3 panes,
+             every project under ~/.claude/projects, read directly (no copy)
 
 Moving the cursor (j/k) in a list pane immediately updates the pane(s) to
 its right, mirroring tig's split "main + diff" view rather than requiring
@@ -277,6 +279,11 @@ class AplApp(App):
     # (DataTable / DetailPane) currently holds focus.
     BINDINGS = [Binding("q", "quit", "Quit", priority=True)]
 
+    # Textual's built-in command palette (fuzzy-searchable menu of commands
+    # like theme toggling, screenshots, quitting) defaults to ctrl+p, which
+    # collides with Termius's own shortcut. Moved to F1.
+    COMMAND_PALETTE_BINDING = "f1"
+
     CSS = """
     Screen {
         background: $surface;
@@ -298,9 +305,9 @@ class AplApp(App):
     }
     """
 
-    def __init__(self):
+    def __init__(self, aggregate: bool = False):
         super().__init__()
-        self.mode, self.root_dir = source.detect_mode(Path.cwd())
+        self.mode, self.root_dir = source.detect_mode(Path.cwd(), aggregate=aggregate)
 
     def on_mount(self) -> None:
         self.push_screen(AplScreen(self.mode, self.root_dir))

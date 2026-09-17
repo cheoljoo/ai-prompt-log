@@ -47,25 +47,30 @@ Claude Code는 이미 세션마다 prompt/응답을 다음 위치에 JSONL로 �
 
 이 설계 덕분에 apl은 **읽기 전용 로그 뷰어**로만 만들면 되고, Claude Code 훅이나 별도 로깅 파이프라인을 새로 만들 필요가 없다. (단, `b2e0d8fb-...jsonl` 처럼 12MB가 넘는 세션 파일도 실제로 존재하므로 — 전체를 메모리에 올리지 않는 스트리밍 파싱 + 인덱스 캐시가 필요하다. §6 리스크 참조.)
 
-### 2-1. 집계(sync) 설계 — 결정됨: "로컬 캐시로 동기화, git 커밋 안 함"
+### 2-1. 집계 설계 — 최종 결정: "복사하지 않고 직접 읽는다" (`apl --all`)
 
-`~/.claude/projects`는 **머신 로컬**이라 다른 머신에서는 안 보인다. 사용자가 이미 `wiki-log`/`wiki-session-export` 스킬로 llm_wiki를 여러 프로젝트의 지식이 모이는 중앙 저장소로 쓰고 있으므로, apl도 같은 위치(llm_wiki)에서 전체를 모아보게 한다. 단, prompt 원문은 민감할 수 있어 **git에는 커밋하지 않는다**.
+**(v0.1에서 llm_wiki 로컬 캐시로 동기화하는 방식을 시도했으나 폐기함 — 아래 참조)**
 
-- `apl sync` (또는 뷰어 기동 시 자동/수동 트리거)가 `~/.claude/projects/**/*.jsonl` 전체를 llm_wiki 저장소 안의 로컬 캐시 디렉터리(예: `llm_wiki/.ai-prompt-log-cache/`)로 미러링한다.
-  - 증분 동기화: mtime/size 비교로 변경된 세션 파일만 다시 복사(또는 심링크) — 매번 전체 복사하지 않음
-  - `llm_wiki/.gitignore`에 캐시 디렉터리 추가 → git history에는 절대 들어가지 않음
-- 여러 머신 간 이동성이 필요하면(llm_wiki 폴더를 백업/rsync 하는 등) 이 캐시 디렉터리도 함께 옮기면 됨 — git이 아닌 별도 수단으로 이동
-- apl의 project-list(3단계 진입) 뷰는 `~/.claude/projects`가 아니라 **이 캐시 디렉터리**를 읽는다 → llm_wiki에서 봐도 항상 "마지막 sync 시점" 데이터라는 점을 상태바에 명시(`last synced: N분 전`)
-- 일반 프로젝트(2단계 모드)는 캐시를 거치지 않고 자기 자신의 `~/.claude/projects/<encoded-cwd>/` 를 직접 읽는다(sync 불필요, 항상 최신)
+처음엔 "여러 머신 간 이동성"을 위해 llm_wiki 저장소 안에 `~/.claude/projects`를 로컬 캐시로 미러링하는 `apl sync`를 만들었다. 하지만 실사용해보니:
+- 그 캐시 자체도 git에 커밋하지 않는 로컬 파일이라, 머신 이동성 문제를 실질적으로 해결해주지 못했다(결국 llm_wiki 폴더를 통째로 수동 백업/rsync 해야 하는 건 캐시가 있든 없든 마찬가지)
+- `apl sync`를 llm_wiki가 아닌 다른 저장소(예: `ai-prompt-log` 자신)에서 실수로 실행하면 그 저장소까지 의도치 않게 3단계(aggregate) 모드로 바뀌는 부작용이 실제로 발생함
+- "캐시가 최신인지" 신경 써야 하는 사용상 번거로움(sync 시점 staleness)만 남음
+
+**결론**: 캐시/복사를 완전히 없애고, 3단계 보기는 그냥 `~/.claude/projects`를 **직접** 읽는다. 2단계/3단계 전환은 "어느 디렉터리에 있는가"가 아니라 **명시적 CLI 플래그**로 한다:
+
+- `apl` — 2단계, 현재 프로젝트 자기 것만 (`~/.claude/projects/<encoded-cwd>/` 직접 읽음)
+- `apl --all`(`-a`) — 3단계, `~/.claude/projects` 전체를 그 자리에서 바로 읽음(복사/캐시 없음, 항상 최신)
+
+이제 "llm_wiki에서 실행해야 3단계가 보인다"는 제약이 없다 — `apl --all`은 어느 디렉터리에서 실행해도 동일하게 동작한다. 여러 머신 이동성이 필요하면 그냥 각 머신에서 `apl --all`을 실행하면 되고(원본 데이터는 항상 그 머신의 `~/.claude/projects`), 별도 동기화 메커니즘은 두지 않는다(범위 밖).
 
 ## 3. UX / 화면 설계
 
 **(v0.1 실사용 피드백으로 재설계됨 — 최초안은 화면 전체를 push/pop하는 Screen 전환 방식이었으나, "화면 전환 대신 나눠서 보여달라"는 피드백에 따라 아래처럼 분할 화면(pane) 방식으로 바뀜. 자세한 변경 이력은 `agents/B-poc.md`.)**
 
 ### 진입 동작 판단
-apl 시작 시 현재 디렉터리(또는 상위 git root)가 llm_wiki 저장소인지 확인한다.
-- **llm_wiki 안(캐시 디렉터리 존재)** → `[ Projects | Prompts | Detail ]` 3-pane
-- **그 외 모든 프로젝트** → Projects pane 없이 `[ Prompts | Detail ]` 2-pane, `~/.claude/projects/<encoded-cwd>/` 직접 읽음
+`--all` 플래그로만 결정한다(§2-1) — 디렉터리 위치는 2단계/3단계 여부에 더 이상 관여하지 않는다.
+- **`apl`** → Projects pane 없이 `[ Prompts | Detail ]` 2-pane. `~/.claude/projects/<encoded-cwd>/`를 찾되, 정확히 그 디렉터리에 없으면 `git status`처럼 **상위 디렉터리로 올라가며** 가장 가까운 조상의 로그를 찾는다(Claude Code 세션은 보통 프로젝트 루트에서 시작되지 하위 디렉터리에서 시작되지 않으므로 — 예: `ai-prompt-log/agents/`에서 `apl`을 실행해도 `ai-prompt-log` 로그가 보임)
+- **`apl --all`** → `[ Projects | Prompts | Detail ]` 3-pane, `~/.claude/projects` 전체를 직접 읽음
 
 세 pane(또는 두 pane)은 화면 전환 없이 **동시에 표시**되고, 왼쪽 리스트 pane에서 커서를 움직이면(Enter 없이) 오른쪽 pane이 즉시 갱신된다 — tig의 main+diff 분할 뷰와 같은 감각.
 
@@ -84,11 +89,13 @@ apl 시작 시 현재 디렉터리(또는 상위 git root)가 llm_wiki 저장소
 - 상세 pane의 tool 호출은 인자별로 들여써서 한 줄씩 표시하고, 긴 값(파일 write content 등)은 잘라서 "(전체 N자)"로 표시 — 가독성 우선
 
 ### 공통 키바인딩 (vi 스타일)
-`j`/`k` 위·아래 이동(방향키도 동일), `g`/`G` 처음·끝, `Ctrl+F`/`Ctrl+B` 한 페이지 아래·위, `Ctrl+D`/`Ctrl+U` 반 페이지 아래·위, `l`/`Tab`/`Enter` 다음 pane으로 포커스 이동, `h`/`Shift+Tab`/`Escape` 이전 pane으로 포커스 이동, `q` 종료(App 레벨 `priority` 바인딩이라 어느 pane에 포커스가 있어도 항상 동작). `/` 검색은 아직 미구현(§7 후속 과제).
+`j`/`k` 위·아래 이동(방향키도 동일), `g`/`G` 처음·끝, `Ctrl+F`/`Ctrl+B` 한 페이지 아래·위, `Ctrl+D`/`Ctrl+U` 반 페이지 아래·위, `l`/`Tab`/`Enter` 다음 pane으로 포커스 이동, `h`/`Shift+Tab`/`Escape` 이전 pane으로 포커스 이동, `q` 종료(App 레벨 `priority` 바인딩이라 어느 pane에 포커스가 있어도 항상 동작), `F1` command palette(Textual 기본 제공 명령 검색 팝업 — 기본 `Ctrl+P`가 Termius와 충돌해 `F1`로 변경). `/` 검색은 아직 미구현(§7 후속 과제).
+
+`apl --help`로 사용법·키바인딩 표·오픈소스 저장소 주소를 확인할 수 있다.
 
 ## 4. 아키텍처 (레이어 3개, 언어 무관하게 동일)
 
-1. **Log Source Layer**: 두 모드 지원 — (a) direct 모드: 현재 프로젝트의 `~/.claude/projects/<encoded-cwd>/*.jsonl`만 직접 스캔 (b) aggregate 모드: llm_wiki 로컬 캐시 디렉터리(§2-1) 전체 스캔. `apl sync`가 `~/.claude/projects/**/*.jsonl` → 캐시 디렉터리 증분 미러링 담당
+1. **Log Source Layer**: 두 모드 지원 — (a) direct 모드: 현재 프로젝트의 `~/.claude/projects/<encoded-cwd>/*.jsonl`만 직접 스캔 (b) aggregate 모드(`--all`): `~/.claude/projects` 전체를 직접 스캔(§2-1, 복사/캐시 없음)
 2. **Parse & Model Layer**: JSONL → `Project { path, sessions[] }` / `Prompt { user_turn, assistant_turns[], tool_calls[], timestamp, branch, sidechain }` 모델로 정규화. 성능을 위해 파싱 결과를 프로젝트별 인덱스(경량 캐시, 예: sqlite 또는 jsonl 자체 mtime 기반 캐시)로 저장
 3. **TUI Layer**: 실행 디렉터리 판정(§3 "진입 동작 판단")에 따라 2단계/3단계 네비게이션 전환 + 색상 렌더링, 필터(날짜/브랜치/source)·통계 화면·export 포함. Log Source/Parse 계층과는 인터페이스로 분리 (나중에 Codex 등 다른 어댑터를 Parse Layer에 추가하기 쉽게)
 
@@ -111,7 +118,6 @@ apl 시작 시 현재 디렉터리(또는 상위 git root)가 llm_wiki 저장소
 - **project 매칭**: 같은 물리 디렉터리를 다른 경로(symlink 등)로 열면 다른 project로 잡힐 수 있음 — 1차 버전은 무시하고 알려진 제약으로 문서화
 - **tool_result 렌더링**: 매우 긴 커맨드 출력은 요약 + "전체보기" 토글 필요
 - **비-Claude Code 어댑터**: 이번 범위 밖, 인터페이스만 열어둠
-- **캐시 staleness(§2-1)**: llm_wiki(3단계 모드)는 마지막 `apl sync` 시점 데이터라 최신이 아닐 수 있음 → 상태바에 sync 시각 필수 표시, 오래됐으면(예: 1일 이상) 경고색
 - **`--resume` 지원 여부 미검증**: §7에서 제안한 "세션 재개 커맨드 표시" 기능은 Claude Code CLI가 실제로 세션 id 기반 재개를 지원하는지 Agent B 단계에서 먼저 확인 필요
 
 ## 7. 참고 도구 조사 결과 및 반영 기능 (Action Items)
@@ -192,22 +198,19 @@ ai-prompt-log/
     pyproject.toml
     apl/
       __init__.py
-      source.py             (jsonl 스캔, direct/aggregate 모드)
-      sync.py               (apl sync: ~/.claude/projects → llm_wiki 캐시 미러링)
+      cli.py                (argparse: --all/-a, --help)
+      source.py             (jsonl 스캔, direct/aggregate 모드 판단)
       model.py              (Project/Prompt 정규화)
       tui.py                (Textual 앱, 2/3단계 뷰 전환)
   cmd/apl/                  (Agent D, Go release)
     main.go
   internal/
     source/                 (jsonl 스캔, 스트리밍 파싱)
-    sync/
     model/
     tui/                    (bubbletea)
   Makefile
   README.md
 ```
-
-llm_wiki 저장소 쪽에는 `.ai-prompt-log-cache/`(§2-1 캐시, `.gitignore` 등록)가 추가된다.
 
 ## 11. 다음 액션
 
