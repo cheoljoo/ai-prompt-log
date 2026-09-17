@@ -174,3 +174,21 @@ func TestQuit(t *testing.T) {
 		t.Fatal("expected q to return a quit command")
 	}
 }
+
+func TestViewBackupRealData(t *testing.T) {
+	m := DetectAndNew("/data01/cheoljoo.lee/code/ai-prompt-log", false, "/tmp/go-backup-real-test")
+	if m.mode != "aggregate" {
+		t.Fatalf("expected aggregate mode via root override, got %s", m.mode)
+	}
+	if m.rootDir != "/tmp/go-backup-real-test" {
+		t.Fatalf("expected root override to be used, got %s", m.rootDir)
+	}
+	m = update(m, tea.WindowSizeMsg{Width: 200, Height: 45})
+	if len(m.projects) != 16 {
+		t.Fatalf("expected 16 backed-up projects, got %d", len(m.projects))
+	}
+	if len(m.currentPrompts) == 0 {
+		t.Fatal("expected first project's prompts preloaded from backup")
+	}
+	t.Logf("view-backup: %d projects, first project prompts=%d", len(m.projects), len(m.currentPrompts))
+}

@@ -35,6 +35,17 @@ Go 1.23.4(공식 바이너리 배포판 직접 설치 — 이 환경의 Homebrew
 - `TestQuit`: `q` → `tea.Quit` 커맨드 반환 확인
 - `go build ./cmd/apl` 성공, `apl --help` 실제 실행해 출력 확인(사용법/플래그/키바인딩/저장소 URL)
 
-### 범위 밖(v1 이식에서 제외, 추후 검토)
-- `apl --backup`/`--view-backup`(Agent F, Python 전용으로 먼저 나온 기능) — Go 쪽 포팅은 후속 과제
-- `apl sync` — 이미 폐기된 기능이라 애초에 이식 대상 아님
+### `apl --backup`/`--view-backup` 추가 이식 (Agent F 기능의 Go 포팅)
+
+처음엔 범위 밖으로 미뤄뒀으나("Python code와 같은 동작을 하도록 go도 변경해줘" 요청에 따라) 이어서 포팅함.
+
+- `internal/backup`: `poc/apl/backup.py`와 1:1 대응(`ResolveDepthRoot`, `FindProjectsByCwdAncestry`/`isRootOrDescendant` — `filepath.Rel` 기반으로 Python의 `root in p.parents` 판정과 동일하게 구현, `SelectProjects`, `CopyProject`, `Run`, `FormatSummary`)
+- `cmd/apl/main.go`: `--backup`/`--view-backup`/`--depth`/`--backup-dir` 플래그 추가. `--depth`는 Go `flag` 패키지에 "미지정" 상태가 없어 `flag.Visit`으로 실제 지정 여부를 판별해 Python의 `depth: int | None` 의미를 재현. `--all`/`--backup`/`--view-backup` 상호배타 검증 등 Python argparse와 동일한 에러 메시지·exit code(2)
+- `internal/model.FindCwdField`를 export해서 backup 패키지가 재사용(Python의 `model._find_cwd_field`와 동일 위치)
+
+### 검증 (실제 데이터, mock 없음)
+- `go test ./internal/backup/...`: `SelectProjects`(depth=nil→1개 현재 프로젝트, depth=1→실제 `~/.claude/projects` 16개 전부와 정확히 일치), `CopyProject` 증분 동작(최초 복사/재실행 unchanged/내용 변경 시 updated/**원본 삭제해도 백업은 그대로 남는 것**까지 임시 디렉터리로 검증)
+- `go test ./internal/tui/...`의 `TestViewBackupRealData`: 실제 백업 디렉터리(`--backup --depth 1`로 만든 16개 프로젝트, 91M)를 `--view-backup`으로 열어 프로젝트 16개, 첫 프로젝트 prompt 정상 로드 확인
+- CLI 실제 실행: `apl --backup --depth 1 --backup-dir <실제경로>` → `16 project(s), 26 copied` 확인 후 재실행 시 `26 unchanged`(Python과 동일한 결과), `apl --depth 1`(단독)과 `apl --all --backup`(동시 지정) 둘 다 exit 2로 정상 거부
+
+이제 Go/Python 두 구현이 완전히 동일한 기능 집합을 가짐(단, Python의 `F1` command palette는 Textual 프레임워크가 공짜로 주는 chrome이라 이식 대상에서 제외 — README에 명시).

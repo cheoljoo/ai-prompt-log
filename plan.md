@@ -195,7 +195,9 @@ Claude Code는 이미 세션마다 prompt/응답을 다음 위치에 JSONL로 �
 ### Agent D — Go Release 구현
 - **Intent**: Agent A 스펙(`docs/data-model.md`) + Python POC(`poc/apl/`)의 검증된 동작을 Go(bubbletea/lipgloss/bubbles)로 이식. `apl`/`apl --all`/`apl --help` 기능·vi 키바인딩 동일하게 구현. 단일 정적 바이너리 빌드.
 - **Result**: `cmd/apl` 빌드 산출물, 실제 데이터로 Python POC와 동일한 golden path(direct 2-pane, aggregate 3-pane, 실시간 갱신) 재확인.
-- **상태: 완료.** `go test ./internal/tui/...`가 실제 데이터로 검증: direct 모드 18개 prompt, aggregate 모드 실제 프로젝트 16개(디렉터리 개수와 정확히 일치), j/k/g/G/Tab/Shift+Tab/Enter/Esc/Ctrl+F/B/D/U 전부 통과. Textual의 "smart escape" 버그(agents/B-poc.md)는 애초에 Go/lipgloss엔 마크업 파서 자체가 없어(스타일은 직접 문자열에 ANSI를 입히는 방식) 이 버그 클래스가 원천적으로 발생하지 않음. tool_use 인자는 Go map이 키 순서를 보존하지 않는 문제를 토큰 단위 순서 보존 JSON 디코더(`internal/model`의 `OrderedValue`)로 직접 해결해 Python과 동일한 순서로 렌더링. 자세한 내용은 `agents/D-go-release.md`.
+- **상태: 완료.** `go test ./internal/tui/...`가 실제 데이터로 검증: direct 모드 18개 prompt, aggregate 모드 실제 프로젝트 16개(디렉터리 개수와 정확히 일치), j/k/g/G/Tab/Shift+Tab/Enter/Esc/Ctrl+F/B/D/U 전부 통과. Textual의 "smart escape" 버그(agents/B-poc.md)는 애초에 Go/lipgloss엔 마크업 파서 자체가 없어(스타일은 직접 문자열에 ANSI를 입히는 방식) 이 버그 클래스가 원천적으로 발생하지 않음. tool_use 인자는 Go map이 키 순서를 보존하지 않는 문제를 토큰 단위 순서 보존 JSON 디코더(`internal/model`의 `OrderedValue`)로 직접 해결해 Python과 동일한 순서로 렌더링.
+- **후속 완료**: "Python과 같은 동작을 하도록 Go도 변경해달라"는 요청에 따라 `internal/backup` 추가 — `apl --backup [--depth N] [--backup-dir PATH]` / `apl --view-backup`을 Go에도 동일하게 이식(Agent F, §2-1a). Go/Python 두 구현이 이제 완전히 동일한 기능 집합(단, Python 전용 `F1` command palette는 Textual 프레임워크 chrome이라 의도적으로 이식 제외).
+- 자세한 내용은 `agents/D-go-release.md`.
 
 ### Agent E — 패키징 & 배포 (§5-1)
 - **Intent**: GoReleaser 설정(`.goreleaser.yaml`)으로 태그 기반 크로스플랫폼 빌드 자동화. Homebrew tap 저장소 생성 및 formula 자동 갱신 연결. README.md에 `brew install` 안내 반영. `security-review` 스킬로 로그 파일(개인정보 포함 가능) 접근 범위 점검(읽기 전용, 외부 전송 없음 확인).
@@ -242,11 +244,12 @@ ai-prompt-log/
       tui.py                (Textual 앱, 2/3단계 분할 pane 뷰)
       backup.py             (Agent F, §2-1a: depth 기반 증분 백업)
   cmd/apl/                  (Agent D, Go release)
-    main.go                 (flag 파싱: --all/-a, --help)
+    main.go                 (flag 파싱: --all/-a, --backup, --view-backup, --depth, --backup-dir, --help)
   internal/                 (Agent D)
     source/                 (jsonl 스캔, direct/aggregate 모드 판단 — poc/apl/source.py와 1:1 대응)
     model/                  (Project/Prompt 정규화, tool_use 인자 순서 보존 JSON 디코더)
     tui/                    (bubbletea/lipgloss/bubbles, 2/3단계 분할 pane 뷰 + tui_test.go)
+    backup/                 (poc/apl/backup.py와 1:1 대응 + backup_test.go)
   go.mod / go.sum
   README.md
 ```

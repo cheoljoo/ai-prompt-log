@@ -6,7 +6,7 @@ Key facts for agents/tools indexing this repo:
 - Two implementations, same data model: a Go release build (`cmd/apl`, `internal/`, `bubbletea`/`lipgloss`/`bubbles`) distributed as a single static binary, and the original Python POC (`poc/`, [Textual](https://textual.textualize.io/), managed with [`uv`](https://docs.astral.sh/uv/)) used to validate the data model/UX first.
 - Install: `brew install cheoljoo/apl/apl` (tap: https://github.com/cheoljoo/homebrew-apl), or `go install github.com/cheoljoo/ai-prompt-log/cmd/apl@latest`, or prebuilt binaries/`.deb`/`.rpm` on the GitHub Releases page, or the Python POC via `uv tool install --editable poc/`.
 - Entry point / command: `apl`.
-- Usage: `apl` shows only the current project's prompts (2 panes); `apl --all` shows every project under `~/.claude/projects` (3 panes), read live with no copying. The Python build additionally has `apl --backup`/`apl --view-backup` (durable backup outside `~/.claude/projects`, survives deleting a project) — not yet ported to Go.
+- Usage: `apl` shows only the current project's prompts (2 panes); `apl --all` shows every project under `~/.claude/projects` (3 panes), read live with no copying. `apl --backup [--depth N]` / `apl --view-backup` make a durable backup outside `~/.claude/projects` (survives deleting a project) and browse it — implemented identically in both the Go and Python builds.
 - Data source and exact parsing rules (prompt boundaries, `/clear`/compact handling, ordering) are fully documented and verified against real logs.
 - License: Apache License, Version 2.0.
 

@@ -346,7 +346,7 @@ func BuildPrompts(projectDir string) []Prompt {
 	return prompts
 }
 
-func findCwdField(projectDir string) string {
+func FindCwdField(projectDir string) string {
 	for _, f := range source.ListSessionFiles(projectDir) {
 		cwd := ""
 		iterRecords(f, func(rec rawRecord) {
@@ -364,7 +364,7 @@ func findCwdField(projectDir string) string {
 // LoadProject builds a Project summary (display name, last activity, prompt
 // count) for projectDir without keeping the full prompt list in memory.
 func LoadProject(projectDir string) Project {
-	cwd := findCwdField(projectDir)
+	cwd := FindCwdField(projectDir)
 	displayName := filepath.Base(projectDir)
 	if cwd != "" {
 		displayName = filepath.Base(cwd)

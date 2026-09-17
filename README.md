@@ -40,7 +40,7 @@ brew install cheoljoo/apl/apl
 go install github.com/cheoljoo/ai-prompt-log/cmd/apl@latest
 ```
 
-**Python POC** (the original prototype implementation, `poc/` — requires Python 3.9+ and [`uv`](https://docs.astral.sh/uv/); has a couple of features (`--backup`/`--view-backup`) not yet ported to the Go version, see [Project status](#project-status)):
+**Python POC** (the original prototype implementation, `poc/` — requires Python 3.9+ and [`uv`](https://docs.astral.sh/uv/); see [Project status](#project-status)):
 
 ```sh
 git clone https://github.com/cheoljoo/ai-prompt-log.git
@@ -99,7 +99,7 @@ A "prompt" is one user turn plus the assistant text/tool-call blocks that follow
 There are two implementations, sharing the same data model and keybindings:
 
 - **`cmd/apl` + `internal/` (Go)** — the recommended one for end users. A single static binary (`bubbletea`/`lipgloss`/`bubbles`), distributed via Homebrew/`.deb`/`.rpm`/prebuilt binaries above. Feature set: `apl`, `apl --all`, `apl --help`.
-- **`poc/` (Python)** — the original prototype ([Textual](https://textual.textualize.io/)), used to validate the data model and UX before the Go port. Still ahead of the Go version on one feature: `apl --backup` / `apl --view-backup`, and has a Textual command palette on `F1` (not present in the Go build).
+- **`poc/` (Python)** — the original prototype ([Textual](https://textual.textualize.io/)), used to validate the data model and UX before the Go port. Same feature set as the Go build, plus a Textual command palette on `F1` (framework-provided chrome, not ported — see the keybindings table).
 
 See [`plan.md`](plan.md) for the full design, decision history, and roadmap.
 
