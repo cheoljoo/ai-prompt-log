@@ -5,7 +5,9 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -15,6 +17,11 @@ import (
 	"github.com/cheoljoo/ai-prompt-log/internal/model"
 	"github.com/cheoljoo/ai-prompt-log/internal/source"
 )
+
+// changeCheckInterval is how often apl checks the current project's session
+// files for changes in the background (it never auto-reloads -- it only
+// flags that Ctrl+L would pick up new data).
+const changeCheckInterval = 30 * time.Second
 
 type pane int
 
@@ -173,6 +180,14 @@ type Model struct {
 	focus  pane
 	width  int
 	height int
+
+	// currentProjectIdx indexes m.projects for whichever project is shown
+	// in promptsTable; currentMTimes is the session-file mtime snapshot
+	// taken at that project's last load, used by Ctrl+L reload.
+	currentProjectIdx int
+	currentMTimes     map[string]time.Time
+	changesPending    bool
+	statusMessage     string
 }
 
 // New builds the initial model for the given mode ("direct" | "aggregate")
@@ -213,7 +228,7 @@ func New(mode, rootDir string) Model {
 	} else {
 		proj := model.LoadProject(rootDir)
 		m.projects = []model.Project{proj}
-		m.setPromptsFrom(proj)
+		m.currentProjectIdx = 0
 		m.focus = panePrompts
 		m.promptsTable = table.New(table.WithColumns(promptCols), table.WithFocused(true))
 		m.setPromptsFrom(proj)
@@ -244,13 +259,87 @@ func (m *Model) setPromptsFrom(proj model.Project) {
 	m.promptsTable.SetRows(rows)
 	m.promptsTable.SetCursor(0)
 	m.refreshDetail()
+
+	m.currentMTimes = snapshotMTimes(proj.DirPath)
+	m.changesPending = false
+	m.statusMessage = ""
 }
 
 func (m *Model) loadPromptsFor(projectIdx int) {
 	if projectIdx < 0 || projectIdx >= len(m.projects) {
 		return
 	}
+	m.currentProjectIdx = projectIdx
 	m.setPromptsFrom(m.projects[projectIdx])
+}
+
+// snapshotMTimes records the modification time of every session file in a
+// project directory, for later comparison to detect whether a reload would
+// pick up new data.
+func snapshotMTimes(dirPath string) map[string]time.Time {
+	files := source.ListSessionFiles(dirPath)
+	mtimes := make(map[string]time.Time, len(files))
+	for _, f := range files {
+		info, err := os.Stat(f)
+		if err != nil {
+			continue
+		}
+		mtimes[f] = info.ModTime()
+	}
+	return mtimes
+}
+
+func mtimesEqual(a, b map[string]time.Time) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || !bv.Equal(v) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasChanges reports whether the current project's session files differ
+// from the mtime snapshot taken at its last load.
+func (m *Model) hasChanges() bool {
+	if m.currentProjectIdx < 0 || m.currentProjectIdx >= len(m.projects) {
+		return false
+	}
+	return !mtimesEqual(snapshotMTimes(m.projects[m.currentProjectIdx].DirPath), m.currentMTimes)
+}
+
+// reload re-reads the current project's prompts if its session files have
+// changed since the last load; otherwise it just reports that there is
+// nothing to do.
+func (m *Model) reload() {
+	if m.currentProjectIdx < 0 || m.currentProjectIdx >= len(m.projects) {
+		return
+	}
+	if !m.hasChanges() {
+		m.statusMessage = "변경 없음"
+		return
+	}
+	refreshed := model.LoadProject(m.projects[m.currentProjectIdx].DirPath)
+	m.projects[m.currentProjectIdx] = refreshed
+	m.setPromptsFrom(refreshed)
+	if m.mode == "aggregate" {
+		rows := m.projectsTable.Rows()
+		if m.currentProjectIdx < len(rows) {
+			rows[m.currentProjectIdx] = table.Row{refreshed.DisplayName, fmt.Sprintf("%d", refreshed.PromptCount), refreshed.LastActivity}
+			m.projectsTable.SetRows(rows)
+		}
+	}
+	m.statusMessage = "다시 불러왔습니다"
+}
+
+type checkChangesMsg struct{}
+
+func tickCheckChanges() tea.Cmd {
+	return tea.Tick(changeCheckInterval, func(time.Time) tea.Msg {
+		return checkChangesMsg{}
+	})
 }
 
 func (m *Model) refreshDetail() {
@@ -267,7 +356,7 @@ func (m *Model) refreshDetail() {
 }
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	return tickCheckChanges()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -278,6 +367,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case checkChangesMsg:
+		if !m.changesPending && m.hasChanges() {
+			m.changesPending = true
+			m.statusMessage = "⚠ 변경 사항이 있습니다 — Ctrl+L로 새로고침하세요"
+		}
+		return m, tickCheckChanges()
 	}
 	return m, nil
 }
@@ -337,6 +432,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focusNext()
 	case "h", "shift+tab", "esc":
 		m.focusPrev()
+	case "ctrl+l":
+		m.reload()
 	}
 	return m, nil
 }
@@ -519,7 +616,14 @@ func (m Model) View() string {
 	panes = append(panes, m.renderPane("Detail", m.detail.View(), m.focus == paneDetail))
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, panes...)
-	footer := styleDim.Render("j/k move  g/G top/bottom  ^F/^B/Space page  ^D/^U half-page  l/Tab/Enter next pane  h/S-Tab/Esc prev pane  q quit")
+	footer := styleDim.Render("j/k move  g/G top/bottom  ^F/^B/Space page  ^D/^U half-page  l/Tab/Enter next pane  h/S-Tab/Esc prev pane  ^L reload  q quit")
+	if m.statusMessage != "" {
+		style := styleDim
+		if m.changesPending {
+			style = styleYellow
+		}
+		footer = style.Render(m.statusMessage) + "  " + footer
+	}
 	return body + "\n" + footer
 }
 

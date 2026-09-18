@@ -163,7 +163,10 @@ class AplScreen(Screen):
         Binding("ctrl+b", "page_up", "Page up", key_display="^B"),
         Binding("ctrl+d", "half_page_down", "½ page down", key_display="^D"),
         Binding("ctrl+u", "half_page_up", "½ page up", key_display="^U"),
+        Binding("ctrl+l", "reload", "Reload", key_display="^L"),
     ]
+
+    CHANGE_CHECK_INTERVAL_SECONDS = 30
 
     def __init__(self, mode: str, root_dir: Path):
         super().__init__()
@@ -171,6 +174,9 @@ class AplScreen(Screen):
         self.root_dir = root_dir
         self._projects: list = []
         self._current_prompts: list = []
+        self._current_project: model.Project | None = None
+        self._current_mtimes: dict = {}
+        self._changes_pending = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -215,8 +221,54 @@ class AplScreen(Screen):
             self._load_prompts_for(project)
             prompts_table.focus()
 
+        self.set_interval(self.CHANGE_CHECK_INTERVAL_SECONDS, self._check_for_changes)
+
+    @staticmethod
+    def _snapshot_mtimes(project: model.Project) -> dict:
+        mtimes = {}
+        for f in source.list_session_files(project.dir_path):
+            try:
+                mtimes[str(f)] = f.stat().st_mtime
+            except OSError:
+                pass
+        return mtimes
+
+    def _has_changes(self) -> bool:
+        if self._current_project is None:
+            return False
+        return self._snapshot_mtimes(self._current_project) != self._current_mtimes
+
+    def _check_for_changes(self) -> None:
+        if self._changes_pending or self._current_project is None:
+            return
+        if self._has_changes():
+            self._changes_pending = True
+            self.query_one("#prompts-table", DataTable).border_subtitle = "⚠ changes available — Ctrl+L to reload"
+            self.notify("변경 사항이 있습니다 — Ctrl+L로 새로고침하세요", title="apl", timeout=5)
+
+    def action_reload(self) -> None:
+        if self._current_project is None:
+            return
+        if not self._has_changes():
+            self.notify("변경 없음", title="apl", timeout=2)
+            return
+        # re-derive the project from its own directory so prompt_count/
+        # last_activity are recomputed too, not just the prompt list
+        refreshed = model.load_project(self._current_project.dir_path)
+        self._load_prompts_for(refreshed)
+        if self.mode == "aggregate":
+            for idx, p in enumerate(self._projects):
+                if p.dir_path == refreshed.dir_path:
+                    self._projects[idx] = refreshed
+                    break
+        self.notify("다시 불러왔습니다", title="apl", timeout=2)
+
     def _load_prompts_for(self, project: model.Project) -> None:
         table = self.query_one("#prompts-table", DataTable)
+        table.border_subtitle = ""
+        self._changes_pending = False
+        self._current_project = project
+        self._current_mtimes = self._snapshot_mtimes(project)
         table.clear()
         self._current_prompts = list(reversed(project.load_prompts()))
         if not self._current_prompts:

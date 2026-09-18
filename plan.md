@@ -110,6 +110,13 @@ Claude Code는 이미 세션마다 prompt/응답을 다음 위치에 JSONL로 �
 
 `apl --help`로 사용법·키바인딩 표·오픈소스 저장소 주소를 확인할 수 있다.
 
+`Ctrl+L`을 누르면 현재 보고 있는 project의 prompt를 다시 읽어들인다(Go/Python 둘 다). 매번 다시 파싱하는
+비용을 피하기 위해 마지막으로 읽은 시점의 session 파일들(jsonl) mtime을 기억해뒀다가, `Ctrl+L`을 누를 때
+현재 mtime과 비교 — 변화가 없으면 다시 읽지 않고 "변경 없음"만 표시한다. 또한 30초마다 백그라운드에서
+같은 방식으로 현재 project를 검사해 변화가 있으면 "⚠ 변경 사항이 있습니다 — Ctrl+L로 새로고침하세요"
+알림만 보여주고 자동으로 reload하지는 않는다(사용자가 보고 있는 화면이 커서 위치까지 포함해 갑자기
+바뀌면 혼란스러우므로, reload 시점은 항상 사용자가 `Ctrl+L`로 직접 결정).
+
 ## 4. 아키텍처 (레이어 3개, 언어 무관하게 동일)
 
 1. **Log Source Layer**: 두 모드 지원 — (a) direct 모드: 현재 프로젝트의 `~/.claude/projects/<encoded-cwd>/*.jsonl`만 직접 스캔 (b) aggregate 모드(`--all`): `~/.claude/projects` 전체를 직접 스캔(§2-1, 복사/캐시 없음)

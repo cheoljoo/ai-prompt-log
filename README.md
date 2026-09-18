@@ -87,8 +87,11 @@ Claude Code only keeps session logs under `~/.claude/projects/<encoded-cwd>/` �
 | `Ctrl+D` / `Ctrl+U` | half page down / up |
 | `l`, `Tab`, `Enter` | focus the next pane to the right (drill in) |
 | `h`, `Shift+Tab`, `Esc` | focus the previous pane (back) |
+| `Ctrl+L` | reload the current project's prompts if its session files changed since the last load (no-op otherwise) |
 | `F1` | command palette (theme, screenshot, ...) — Python build only |
 | `q` | quit |
+
+apl checks the current project's session files every 30 seconds; if they changed, it shows a notice that `Ctrl+L` will pick up the new data — it never reloads automatically.
 
 ## How it works
 

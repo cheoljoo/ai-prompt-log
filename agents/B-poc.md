@@ -91,6 +91,13 @@
 - `Space` 키를 `Ctrl+F`(page down)와 동일하게 바인딩.
 - **Detail pane 순서 변경**: 기존 `USER → ASSISTANT`(prompt + 전체 동작 trace)에서 `USER → FINAL-RESULT → ASSISTANT`로 바꿈. `FINAL-RESULT`는 assistant 응답 끝에 연속된 text 블록들(도구 호출 이후 마무리 설명)만 뽑아 보여주고, 그 아래 `ASSISTANT`에는 기존처럼 전체 trace(도구 호출 포함)가 그대로 나오며 끝에 같은 최종 결론이 다시 나온다 — 중복이지만 "결론 먼저 보고 필요하면 과정을 본다"는 사용성을 위한 의도적 설계. 실제 이 대화 세션의 prompt로 헤드리스 검증(`USER`/`FINAL-RESULT`/`ASSISTANT` 순서, 실제 텍스트 일치).
 
+## `Ctrl+L` reload + 30초 변경 감지
+
+- `AplScreen.BINDINGS`에 `Binding("ctrl+l", "reload", "Reload", key_display="^L")` 추가.
+- 현재 보고 있는 project의 session 파일들(jsonl) mtime을 `_load_prompts_for()`가 호출될 때마다 `_current_mtimes`에 스냅샷으로 저장. `action_reload()`는 현재 mtime을 다시 찍어 비교(`_has_changes()`) — 변화 없으면 다시 파싱하지 않고 "변경 없음" 토스트만 표시, 있으면 `model.load_project()`로 다시 읽어 prompts pane/detail pane을 갱신.
+- `set_interval(30, self._check_for_changes)`로 30초마다 같은 비교를 백그라운드에서 수행 — 변화가 있으면 `border_subtitle`에 "⚠ changes available — Ctrl+L to reload"를 표시하고 `notify()` 토스트도 띄우지만, **자동으로는 reload하지 않는다**(사용자가 보고 있는 커서 위치가 갑자기 바뀌는 걸 피하기 위해 reload 시점은 항상 `Ctrl+L`로 사용자가 직접 결정).
+- 실제 session 파일을 격리된 임시 디렉터리로 복사해(운영 중인 `~/.claude/projects` 데이터는 건드리지 않음) 헤드리스로 검증: no-op reload(변경 없음), 변경 감지 후 표시, 실제 reload 전부 통과. `regression_v2.py` 전체 재통과(16개 프로젝트, 611개 prompt, 0 fail).
+
 ## 알려진 POC 한계 (Agent C/D에서 다룰 것)
 - `/` 검색, 날짜/브랜치/source 필터, 통계 화면, export, `--since`/`--tail`, 세션 재개(`--resume`) 표시 — plan.md §7에서 반영하기로 한 기능들은 아직 미구현(POC는 최소 골격만)
 - `thinking` 블록은 항상 숨김(토글 없음)
