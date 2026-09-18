@@ -8,6 +8,9 @@ on:
   push:
     tags:
       - "v*"
+  # Manual fallback, e.g. to finish a release whose tag push didn't trigger
+  # this workflow (see release-please.yml's token comment).
+  workflow_dispatch:
 
 permissions:
   contents: write

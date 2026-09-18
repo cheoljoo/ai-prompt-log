@@ -13,7 +13,11 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      # Use a PAT, not the default GITHUB_TOKEN: tags/pushes made with the
+      # default token don't trigger other workflows (loop-prevention), so
+      # release.yml would never fire when release-please tags a release.
       - uses: googleapis/release-please-action@v4
         with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json

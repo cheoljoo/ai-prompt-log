@@ -91,6 +91,14 @@ Go 1.23.4(공식 바이너리 배포판 직접 설치 — 이 환경의 Homebrew
 - `homebrew-apl`은 `ai-prompt-log`와 별개 저장소라 기본 `GITHUB_TOKEN`으로는 push 불가 — 저장소 Actions secret `HOMEBREW_TAP_GITHUB_TOKEN`(fine-grained PAT, `homebrew-apl`에 대해 `Contents: Read and write`만 부여)을 만들어 `.goreleaser.yaml`의 `brews[0].repository.token`에서 `{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}`으로 참조.
 - 로컬에서 `goreleaser check`는 기존부터 있던 `brews` 필드 deprecation 경고 때문에 exit 2가 나지만(이 작업 이전부터 존재하던 것, 무관), 실제 `goreleaser release`(`--snapshot --clean --skip=publish,sign`로 dry-run 검증)는 이 경고와 무관하게 정상 동작 확인.
 
+### 실전 첫 릴리스에서 발견한 버그: 기본 `GITHUB_TOKEN`이 만든 태그는 다른 workflow를 못 깨움
+
+처음 이 자동화로 Release PR(`chore(main): release 0.3.0`)을 merge했더니 release-please가 `v0.3.0` 태그까지는 정상 생성했지만, `release.yml`(goreleaser)이 **전혀 실행되지 않는** 문제 발생. 원인: GitHub Actions는 무한 루프 방지를 위해 기본 `GITHUB_TOKEN`으로 만든 push/태그는 다른 workflow의 트리거로 인정하지 않음 — `release-please-action`이 기본 토큰으로 태그를 만들었기 때문에 `on: push: tags:`가 반응하지 않았음.
+
+- **수정**: `release-please-action`에 저장소 Actions secret `RELEASE_PLEASE_TOKEN`(fine-grained PAT, `ai-prompt-log` 자체에 대해 `Contents: Read and write` + `Pull requests: Read and write`)을 `token:` 입력으로 전달 — PAT으로 만든 태그 push는 "진짜 사용자 push"로 취급돼 정상적으로 `release.yml`을 발동시킴.
+- `release.yml`에 `workflow_dispatch:` 트리거도 추가 — 이번처럼 태그가 이미 만들어졌는데 놓친 경우, `main`의 HEAD가 여전히 그 태그를 가리킬 때 `gh workflow run release.yml --ref main`으로 수동 복구 가능.
+- 저장소 Actions 설정 `can_approve_pull_request_reviews`(= "Allow GitHub Actions to create and approve pull requests")도 기본값 `false`라 release-please의 첫 실행이 "GitHub Actions is not permitted to create or approve pull requests"로 실패했음 — 이것도 `true`로 켜야 함(워크플로우 YAML의 `permissions:` 블록과 별개의, 저장소 차원 게이트).
+
 ## `Ctrl+L` reload + 30초 변경 감지 (Python과 동일하게)
 
 - `Model`에 `currentProjectIdx int`, `currentMTimes map[string]time.Time`, `changesPending bool`, `statusMessage string` 필드 추가. `setPromptsFrom()`이 project를 로드할 때마다 `snapshotMTimes()`(`source.ListSessionFiles` + `os.Stat`)로 mtime을 스냅샷.
