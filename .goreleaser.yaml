@@ -54,6 +54,7 @@ brews:
     repository:
       owner: cheoljoo
       name: homebrew-apl
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/cheoljoo/ai-prompt-log
     description: "tig-style terminal viewer for Claude Code session logs"
     license: Apache-2.0
