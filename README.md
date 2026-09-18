@@ -40,6 +40,8 @@ brew install cheoljoo/apl/apl
 go install github.com/cheoljoo/ai-prompt-log/cmd/apl@latest
 ```
 
+See [`docs/release.md`](docs/release.md) for how these packages are built and how a new version gets released (CI pipeline, versioning policy, troubleshooting).
+
 **Python POC** (the original prototype implementation, `poc/` — requires Python 3.9+ and [`uv`](https://docs.astral.sh/uv/); see [Project status](#project-status)):
 
 ```sh
