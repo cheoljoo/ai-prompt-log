@@ -79,3 +79,13 @@ Go 1.23.4(공식 바이너리 배포판 직접 설치 — 이 환경의 Homebrew
 - Space 키(`tea.KeyMsg.String()`이 `" "`(공백 문자 그대로)임을 실측 확인 후) `ctrl+f`와 동일하게 페이지다운 처리.
 - `formatPromptDetail`을 Python과 동일하게 `USER → FINAL-RESULT → ASSISTANT` 순서로 재구성(`finalResultText`: 블록 리스트 끝에서부터 연속된 text 블록만 역순으로 모음).
 - `go test ./internal/tui/...`에 `TestSpaceAndGRealData`, `TestFinalResultSectionRealData` 추가, 실제 데이터로 순서·커서 이동 검증 통과.
+
+## PR merge → 자동 버전 bump + 배포 (release-please + GoReleaser CI)
+
+"PR을 merge하면 자동으로 새 버전이 만들어져 배포되게 할 수 있는가"라는 요청에 따라, 매번 merge마다 바로 릴리스하는 대신 **변경사항을 하나의 "Release PR"에 모아뒀다가, 그 Release PR을 merge하는 시점에만 실제 배포**가 일어나도록 구성함([release-please](https://github.com/googleapis/release-please) 방식).
+
+- `.github/workflows/release-please.yml`: `main` push마다 실행. `release-please-config.json`(`release-type: simple`, `poc/pyproject.toml`의 `[project].version`을 `extra-files`로 같이 bump)과 `.release-please-manifest.json`(현재 버전 추적, `0.2.3`에서 시작)을 읽어 Release PR을 열거나 갱신. Go 쪽은 버전이 파일에 저장되지 않고(`main.go`의 `version` 변수는 항상 빌드 시점에 goreleaser가 태그로 주입) bump 대상 파일이 필요 없음.
+- **커밋 메시지 컨벤션과의 충돌**: 개별 git 커밋 메시지는 전역 CLAUDE.md 규칙대로 `[AGILEDEV-1134] feat: ...`처럼 Jira 티켓이 맨 앞에 오는데, release-please는 conventional commits 규칙상 `feat:`/`fix:`가 문자열 맨 앞이어야 타입을 인식함. 그래서 **이 저장소는 PR을 "Squash and merge"로만 병합**하고(merge commit/rebase는 저장소 설정에서 비활성화 예정), **PR 제목을 `feat: ...`/`fix: ...`로 시작**하는 컨벤션을 쓰기로 함 — 개별 커밋의 티켓 prefix 습관과 Jira 코멘트 자동화는 브랜치 안에서 그대로 유지되고, `main`에 남는 squash 커밋(=PR 제목)만 conventional commits 형식을 따름.
+- `.github/workflows/release.yml`: release-please가 만든 `v*` 태그 push에 반응해 `goreleaser release --clean` 실행 — GitHub Release 아티팩트(tar.gz/deb/rpm/checksums)를 release-please가 만든 릴리스에 추가하고, Homebrew tap(`cheoljoo/homebrew-apl`) formula도 같이 갱신. release-please가 만드는 기본 GitHub Release와 태그 이름이 겹치는 게 아니라, goreleaser가 **같은 태그의 기존 release에 아티팩트를 append**하는 방식이라 충돌 없이 동작(goreleaser 공식 문서의 release-please 연동 패턴).
+- `homebrew-apl`은 `ai-prompt-log`와 별개 저장소라 기본 `GITHUB_TOKEN`으로는 push 불가 — 저장소 Actions secret `HOMEBREW_TAP_GITHUB_TOKEN`(fine-grained PAT, `homebrew-apl`에 대해 `Contents: Read and write`만 부여)을 만들어 `.goreleaser.yaml`의 `brews[0].repository.token`에서 `{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}`으로 참조.
+- 로컬에서 `goreleaser check`는 기존부터 있던 `brews` 필드 deprecation 경고 때문에 exit 2가 나지만(이 작업 이전부터 존재하던 것, 무관), 실제 `goreleaser release`(`--snapshot --clean --skip=publish,sign`로 dry-run 검증)는 이 경고와 무관하게 정상 동작 확인.
