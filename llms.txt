@@ -15,6 +15,7 @@ Key facts for agents/tools indexing this repo:
 - [README.md](README.md): install, usage, keybindings, how it works
 - [plan.md](plan.md): full design doc, architecture, roadmap, POC vs. release language choice
 - [docs/data-model.md](docs/data-model.md): exact JSONL parsing rules, verified against real Claude Code session logs
+- [docs/release.md](docs/release.md): packaging and release process — what gets built, versioning policy, the release-please + GoReleaser CI pipeline, required secrets, known pitfalls
 - [agents/](agents/): per-milestone "contract" files (intent / input / result) documenting what was built and why, including real bugs found and fixed during development
 
 ## Source
