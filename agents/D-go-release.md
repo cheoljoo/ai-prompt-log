@@ -79,3 +79,10 @@ Go 1.23.4(공식 바이너리 배포판 직접 설치 — 이 환경의 Homebrew
 - Space 키(`tea.KeyMsg.String()`이 `" "`(공백 문자 그대로)임을 실측 확인 후) `ctrl+f`와 동일하게 페이지다운 처리.
 - `formatPromptDetail`을 Python과 동일하게 `USER → FINAL-RESULT → ASSISTANT` 순서로 재구성(`finalResultText`: 블록 리스트 끝에서부터 연속된 text 블록만 역순으로 모음).
 - `go test ./internal/tui/...`에 `TestSpaceAndGRealData`, `TestFinalResultSectionRealData` 추가, 실제 데이터로 순서·커서 이동 검증 통과.
+
+## `Ctrl+L` reload + 30초 변경 감지 (Python과 동일하게)
+
+- `Model`에 `currentProjectIdx int`, `currentMTimes map[string]time.Time`, `changesPending bool`, `statusMessage string` 필드 추가. `setPromptsFrom()`이 project를 로드할 때마다 `snapshotMTimes()`(`source.ListSessionFiles` + `os.Stat`)로 mtime을 스냅샷.
+- `handleKey`의 `ctrl+l` 케이스가 `reload()`를 호출: `hasChanges()`(스냅샷 vs 현재 mtime 비교)가 false면 다시 파싱하지 않고 `statusMessage = "변경 없음"`만 세팅, true면 `model.LoadProject()`로 다시 읽어 prompts pane/detail pane 및(aggregate 모드면) projects pane row까지 갱신.
+- bubbletea에는 Textual의 `notify()` 같은 토스트가 없어 `checkChangesMsg` + `tea.Tick(30s, ...)`로 주기적 백그라운드 체크를 구현하고, footer 줄 앞에 `statusMessage`를 노란색(`styleYellow`)으로 붙여 알림을 표시 — Textual의 `border_subtitle`/토스트 역할을 footer 상태 줄로 대체. 이때도 **자동 reload는 하지 않음**(Python과 동일하게 `Ctrl+L`이 유일한 reload 트리거).
+- `go test ./internal/tui/...`에 `TestReloadRealData` 추가: `backup.Run()`으로 실제 프로젝트 데이터를 격리된 임시 디렉터리에 복사해(운영 중인 `~/.claude/projects`는 건드리지 않음) no-op reload, 30초 주기 체크의 변경 감지(reload는 안 함), `Ctrl+L`로 실제 reload까지 전부 헤드리스로 검증. `go build`/`go vet`/`go test ./...`/`gofmt -l .` 전부 통과.

@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -38,6 +40,8 @@ func key(k string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyCtrlD}
 	case "ctrl+u":
 		return tea.KeyMsg{Type: tea.KeyCtrlU}
+	case "ctrl+l":
+		return tea.KeyMsg{Type: tea.KeyCtrlL}
 	case "q":
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}
 	default:
@@ -257,4 +261,85 @@ func TestFinalResultSectionRealData(t *testing.T) {
 		t.Fatalf("expected USER -> FINAL-RESULT -> ASSISTANT order, got indices %d, %d, %d", userIdx, finalIdx, assistantIdx)
 	}
 	t.Logf("FINAL-RESULT section present and correctly ordered")
+}
+
+// TestReloadRealData exercises Ctrl+L reload and the 30s background change
+// check against a real (copied) session file, never touching the actual
+// ~/.claude/projects data.
+func TestReloadRealData(t *testing.T) {
+	backupDir := t.TempDir()
+	depth := 1
+	backup.Run("/data01/cheoljoo.lee/code/ai-prompt-log", &depth, backupDir)
+
+	m := DetectAndNew("/data01/cheoljoo.lee/code/ai-prompt-log", false, backupDir)
+	m = update(m, tea.WindowSizeMsg{Width: 160, Height: 40})
+
+	proj := m.projects[m.currentProjectIdx]
+	files := source.ListSessionFiles(proj.DirPath)
+	if len(files) == 0 {
+		t.Fatal("expected at least one copied session file")
+	}
+	promptsBefore := len(m.currentPrompts)
+
+	// No changes yet: Ctrl+L should report nothing to do and leave prompts untouched.
+	m = update(m, key("ctrl+l"))
+	if m.changesPending {
+		t.Fatal("changesPending should stay false with no file changes")
+	}
+	if m.statusMessage != "변경 없음" {
+		t.Fatalf("expected no-change status message, got %q", m.statusMessage)
+	}
+	if len(m.currentPrompts) != promptsBefore {
+		t.Fatalf("no-op reload should not change prompt count: %d -> %d", promptsBefore, len(m.currentPrompts))
+	}
+
+	// Modify one of the real copied session files and force its mtime
+	// forward so the change is detectable regardless of filesystem mtime
+	// resolution.
+	target := files[0]
+	original, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(original), "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatal("expected at least one line in the copied session file")
+	}
+	appended := string(original) + lines[len(lines)-1] + "\n"
+	if err := os.WriteFile(target, []byte(appended), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Minute)
+	if err := os.Chtimes(target, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	if !m.hasChanges() {
+		t.Fatal("expected hasChanges to detect the modified session file")
+	}
+
+	// The periodic background check should flag it without reloading.
+	m = update(m, checkChangesMsg{})
+	if !m.changesPending {
+		t.Fatal("expected changesPending to be set by the periodic check")
+	}
+	if !strings.Contains(m.statusMessage, "Ctrl+L") {
+		t.Fatalf("expected a change notice mentioning Ctrl+L, got %q", m.statusMessage)
+	}
+	if len(m.currentPrompts) != promptsBefore {
+		t.Fatalf("periodic check must not auto-reload: %d -> %d", promptsBefore, len(m.currentPrompts))
+	}
+
+	// Ctrl+L now reloads and clears the pending flag.
+	m = update(m, key("ctrl+l"))
+	if m.changesPending {
+		t.Fatal("changesPending should clear after reload")
+	}
+	if m.statusMessage != "다시 불러왔습니다" {
+		t.Fatalf("expected reload confirmation, got %q", m.statusMessage)
+	}
+	if m.hasChanges() {
+		t.Fatal("hasChanges should be false right after a successful reload")
+	}
+	t.Logf("reload: %d -> %d prompts after picking up the change", promptsBefore, len(m.currentPrompts))
 }
