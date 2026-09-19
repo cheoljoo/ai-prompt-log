@@ -43,6 +43,7 @@ var (
 	styleBlue           = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 	styleYellow         = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styleCyan           = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+	styleGreen          = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
 	styleBold           = lipgloss.NewStyle().Bold(true)
 	paneStyle           = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
 	paneFocusStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6"))
@@ -101,7 +102,13 @@ func finalResultText(p model.Prompt) string {
 func formatPromptDetail(p model.Prompt) string {
 	var b strings.Builder
 
-	meta := []string{styleDim.Render(p.Timestamp)}
+	srcBadge := styleCyan.Render("[claude]")
+	if p.Source == "agy" {
+		srcBadge = styleGreen.Render("[agy]")
+	} else if p.Source == "gemini" {
+		srcBadge = styleBlue.Render("[gemini]")
+	}
+	meta := []string{srcBadge, styleDim.Render(p.Timestamp)}
 	if p.Branch != "" {
 		meta = append(meta, styleMagenta.Render(p.Branch))
 	}
@@ -167,8 +174,9 @@ func formatPromptDetail(p model.Prompt) string {
 
 // Model is the bubbletea model driving apl's split-pane UI.
 type Model struct {
-	mode    string
-	rootDir string
+	mode         string
+	rootDir      string
+	sourceFilter string
 
 	projects      []model.Project
 	projectsTable table.Model
@@ -190,17 +198,21 @@ type Model struct {
 	statusMessage     string
 }
 
-// New builds the initial model for the given mode ("direct" | "aggregate")
-// and root directory, loading data synchronously (matching the Python POC).
-func New(mode, rootDir string) Model {
+// NewWithFilter builds the initial model respecting the source filter.
+func NewWithFilter(mode, rootDir, sourceFilter string) Model {
+	if sourceFilter == "" {
+		sourceFilter = "all"
+	}
 	m := Model{
-		mode:    mode,
-		rootDir: rootDir,
-		detail:  viewport.New(10, 10),
+		mode:         mode,
+		rootDir:      rootDir,
+		sourceFilter: sourceFilter,
+		detail:       viewport.New(10, 10),
 	}
 
 	promptCols := []table.Column{
 		{Title: "Date", Width: 19},
+		{Title: "Source", Width: 7},
 		{Title: "Branch", Width: 10},
 		{Title: "Tokens", Width: 7},
 		{Title: "Tag", Width: 10},
@@ -211,14 +223,15 @@ func New(mode, rootDir string) Model {
 	if mode == "aggregate" {
 		projCols := []table.Column{
 			{Title: "Project", Width: 20},
+			{Title: "Source", Width: 10},
 			{Title: "Prompts", Width: 7},
 			{Title: "Last activity", Width: 19},
 		}
 		m.projectsTable = table.New(table.WithColumns(projCols), table.WithFocused(true))
-		m.projects = model.LoadProjects(rootDir)
+		m.projects = model.LoadProjectsWithFilter(rootDir, sourceFilter)
 		rows := make([]table.Row, 0, len(m.projects))
 		for _, p := range m.projects {
-			rows = append(rows, table.Row{p.DisplayName, fmt.Sprintf("%d", p.PromptCount), p.LastActivity})
+			rows = append(rows, table.Row{p.DisplayName, p.Source, fmt.Sprintf("%d", p.PromptCount), p.LastActivity})
 		}
 		m.projectsTable.SetRows(rows)
 		m.focus = paneProjects
@@ -226,7 +239,7 @@ func New(mode, rootDir string) Model {
 			m.loadPromptsFor(0)
 		}
 	} else {
-		proj := model.LoadProject(rootDir)
+		proj := model.LoadProjectWithFilter(rootDir, sourceFilter)
 		m.projects = []model.Project{proj}
 		m.currentProjectIdx = 0
 		m.focus = panePrompts
@@ -234,6 +247,11 @@ func New(mode, rootDir string) Model {
 		m.setPromptsFrom(proj)
 	}
 	return m
+}
+
+// New builds the initial model for the given mode and root directory.
+func New(mode, rootDir string) Model {
+	return NewWithFilter(mode, rootDir, "all")
 }
 
 func (m *Model) setPromptsFrom(proj model.Project) {
@@ -256,13 +274,13 @@ func (m *Model) setPromptsFrom(proj model.Project) {
 		if len(ts) > 19 {
 			ts = ts[:19]
 		}
-		rows = append(rows, table.Row{ts, p.Branch, formatTokens(p.TotalTokens), tag, p.Summary()})
+		rows = append(rows, table.Row{ts, p.Source, p.Branch, formatTokens(p.TotalTokens), tag, p.Summary()})
 	}
 	m.promptsTable.SetRows(rows)
 	m.promptsTable.SetCursor(0)
 	m.refreshDetail()
 
-	m.currentMTimes = snapshotMTimes(proj.DirPath)
+	m.currentMTimes = snapshotMTimes(proj)
 	m.changesPending = false
 	m.statusMessage = ""
 }
@@ -276,10 +294,9 @@ func (m *Model) loadPromptsFor(projectIdx int) {
 }
 
 // snapshotMTimes records the modification time of every session file in a
-// project directory, for later comparison to detect whether a reload would
-// pick up new data.
-func snapshotMTimes(dirPath string) map[string]time.Time {
-	files := source.ListSessionFiles(dirPath)
+// project, for later comparison to detect whether a reload would pick up new data.
+func snapshotMTimes(proj model.Project) map[string]time.Time {
+	files := proj.GetSessionFiles()
 	mtimes := make(map[string]time.Time, len(files))
 	for _, f := range files {
 		info, err := os.Stat(f)
@@ -309,7 +326,7 @@ func (m *Model) hasChanges() bool {
 	if m.currentProjectIdx < 0 || m.currentProjectIdx >= len(m.projects) {
 		return false
 	}
-	return !mtimesEqual(snapshotMTimes(m.projects[m.currentProjectIdx].DirPath), m.currentMTimes)
+	return !mtimesEqual(snapshotMTimes(m.projects[m.currentProjectIdx]), m.currentMTimes)
 }
 
 // reload re-reads the current project's prompts if its session files have
@@ -323,13 +340,13 @@ func (m *Model) reload() {
 		m.statusMessage = "변경 없음"
 		return
 	}
-	refreshed := model.LoadProject(m.projects[m.currentProjectIdx].DirPath)
+	refreshed := model.LoadProjectWithFilter(m.projects[m.currentProjectIdx].DirPath, m.sourceFilter)
 	m.projects[m.currentProjectIdx] = refreshed
 	m.setPromptsFrom(refreshed)
 	if m.mode == "aggregate" {
 		rows := m.projectsTable.Rows()
 		if m.currentProjectIdx < len(rows) {
-			rows[m.currentProjectIdx] = table.Row{refreshed.DisplayName, fmt.Sprintf("%d", refreshed.PromptCount), refreshed.LastActivity}
+			rows[m.currentProjectIdx] = table.Row{refreshed.DisplayName, refreshed.Source, fmt.Sprintf("%d", refreshed.PromptCount), refreshed.LastActivity}
 			m.projectsTable.SetRows(rows)
 		}
 	}
@@ -639,12 +656,20 @@ func (m Model) renderPane(title, body string, focused bool) string {
 	return lipgloss.JoinVertical(lipgloss.Left, label, box)
 }
 
-// DetectAndNew is a convenience wrapper mirroring the Python AplApp
-// constructor: resolves mode/root from cwd + flags and builds the Model.
-func DetectAndNew(cwd string, aggregate bool, rootOverride string) Model {
-	mode, root := source.DetectMode(cwd, aggregate)
+// DetectAndNewWithFilter resolves mode/root from cwd + flags and builds the Model with source filter.
+func DetectAndNewWithFilter(cwd string, aggregate bool, rootOverride, sourceFilter string) Model {
+	if sourceFilter == "" {
+		sourceFilter = "all"
+	}
+	mode, root := source.DetectModeWithFilter(cwd, aggregate, sourceFilter)
 	if rootOverride != "" {
 		mode, root = "aggregate", rootOverride
 	}
-	return New(mode, root)
+	return NewWithFilter(mode, root, sourceFilter)
+}
+
+// DetectAndNew is a convenience wrapper mirroring the Python AplApp
+// constructor: resolves mode/root from cwd + flags and builds the Model.
+func DetectAndNew(cwd string, aggregate bool, rootOverride string) Model {
+	return DetectAndNewWithFilter(cwd, aggregate, rootOverride, "all")
 }

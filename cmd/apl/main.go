@@ -48,24 +48,29 @@ func fail(format string, args ...any) {
 }
 
 func main() {
-	all := flag.Bool("all", false, "Browse every project under ~/.claude/projects (3-pane aggregate view)")
+	all := flag.Bool("all", false, "Browse every project (3-pane aggregate view)")
 	flag.BoolVar(all, "a", false, "shorthand for --all")
 	doBackup := flag.Bool("backup", false, "Copy session jsonl files into --backup-dir (default ~/ai-prompt-log.backup/), incrementally, and exit. Never deletes anything already in the backup.")
 	viewBackup := flag.Bool("view-backup", false, "Browse a previous --backup (3-pane aggregate view, rooted at --backup-dir)")
 	depth := flag.Int("depth", 0, "With --backup: walk up N directories from cwd and back up every project whose real cwd is that directory or a descendant of it. Omit to back up only the current project.")
 	backupDir := flag.String("backup-dir", "", "Backup directory for --backup / --view-backup (default: ~/ai-prompt-log.backup/)")
+	sourceFlag := flag.String("source", "all", "AI assistant log source to display (all, claude, agy, gemini)")
+	flag.StringVar(sourceFlag, "s", "all", "shorthand for --source")
+	onlyAgy := flag.Bool("agy", false, "Display only Antigravity CLI (agy) logs")
+	onlyClaude := flag.Bool("claude", false, "Display only Claude Code logs")
+	onlyGemini := flag.Bool("gemini", false, "Display only Antigravity / Gemini CLI logs (alias for --agy)")
 	showVersion := flag.Bool("version", false, "Print the apl version and exit")
 	flag.BoolVar(showVersion, "v", false, "shorthand for --version")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "apl (AI Prompt Log viewer) - a tig-style TUI for browsing Claude Code session logs,\n")
-		fmt.Fprintf(os.Stderr, "read directly from ~/.claude/projects (no copying).\n\n")
+		fmt.Fprintf(os.Stderr, "apl (AI Prompt Log viewer) - a tig-style TUI for browsing Claude Code and Antigravity CLI (agy / gemini) session logs,\n")
+		fmt.Fprintf(os.Stderr, "read directly from ~/.claude/projects and ~/.gemini/antigravity-cli (no copying).\n\n")
 		fmt.Fprintf(os.Stderr, "Plain `apl` shows just the current project's own prompts (2 panes: Prompts | Detail).\n")
 		fmt.Fprintf(os.Stderr, "`apl --all` shows every project at once (3 panes: Projects | Prompts | Detail).\n\n")
 		fmt.Fprintf(os.Stderr, "`apl --backup` copies session logs into a durable backup directory (outside\n")
-		fmt.Fprintf(os.Stderr, "~/.claude/projects, so it survives a project directory being deleted).\n")
+		fmt.Fprintf(os.Stderr, "live directories, so it survives a project directory being deleted).\n")
 		fmt.Fprintf(os.Stderr, "`apl --view-backup` browses that backup with the same 3-pane view.\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: apl [-a|--all | --backup | --view-backup] [--depth N] [--backup-dir PATH]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: apl [-a|--all | --backup | --view-backup] [--depth N] [--backup-dir PATH] [-s|--source {all,claude,agy,gemini} | --agy | --claude | --gemini]\n\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n%s\napl %s\nSource: %s\n", keybindingsHelp, resolvedVersion(), gitURL)
 	}
@@ -82,6 +87,18 @@ func main() {
 			depthGiven = true
 		}
 	})
+
+	sourceFilter := *sourceFlag
+	if *onlyAgy || *onlyGemini {
+		sourceFilter = "agy"
+	} else if *onlyClaude {
+		sourceFilter = "claude"
+	}
+	switch sourceFilter {
+	case "all", "claude", "agy", "gemini":
+	default:
+		fail("invalid source %q: choose from all, claude, agy, gemini", sourceFilter)
+	}
 
 	modeCount := 0
 	for _, v := range []bool{*all, *doBackup, *viewBackup} {
@@ -115,19 +132,19 @@ func main() {
 		if depthGiven {
 			depthPtr = depth
 		}
-		stats := backup.Run(cwd, depthPtr, dir)
+		stats := backup.RunWithFilter(cwd, depthPtr, dir, sourceFilter)
 		fmt.Println(backup.FormatSummary(stats, dir))
 		if stats.Projects == 0 {
-			fmt.Fprintln(os.Stderr, "no matching project found under ~/.claude/projects for this directory")
+			fmt.Fprintln(os.Stderr, "no matching project found for this directory")
 		}
 		return
 	}
 
 	var m tui.Model
 	if *viewBackup {
-		m = tui.DetectAndNew(cwd, false, dir)
+		m = tui.DetectAndNewWithFilter(cwd, false, dir, sourceFilter)
 	} else {
-		m = tui.DetectAndNew(cwd, *all, "")
+		m = tui.DetectAndNewWithFilter(cwd, *all, "", sourceFilter)
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
