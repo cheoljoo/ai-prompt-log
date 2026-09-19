@@ -7,11 +7,13 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	json "github.com/goccy/go-json"
 
@@ -25,6 +27,11 @@ var commandRE = regexp.MustCompile(`(?s)<command-name>\s*(.*?)\s*</command-name>
 // commands, Monitor watches, scheduled wakeups, ...) are delivered in -- its
 // <summary> is a human-readable one-liner of what actually happened.
 var taskNotificationRE = regexp.MustCompile(`(?s)<task-notification>.*?<summary>\s*(.*?)\s*</summary>`)
+
+var slashCmdRE = regexp.MustCompile(`^/[a-zA-Z0-9_-]+`)
+var userRequestRE = regexp.MustCompile(`(?s)<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>`)
+var additionalMetaRE = regexp.MustCompile(`(?s)<ADDITIONAL_METADATA>.*?</ADDITIONAL_METADATA>`)
+var userSettingsRE = regexp.MustCompile(`(?s)<USER_SETTINGS_CHANGE>.*?</USER_SETTINGS_CHANGE>`)
 
 // KV is one ordered key/value pair from a JSON object's top level (Go maps
 // don't preserve key order, but tool_use arguments should render in the
@@ -202,10 +209,27 @@ type Prompt struct {
 	UserText    string
 	Blocks      []AssistantBlock
 	TotalTokens int64
+	Source      string // "claude" | "agy" | "gemini"
 }
 
 func (p *Prompt) IsCommand() bool {
-	return commandRE.MatchString(p.UserText)
+	if commandRE.MatchString(p.UserText) {
+		return true
+	}
+	text := strings.TrimSpace(p.UserText)
+	if text == "" {
+		return false
+	}
+	firstLine := strings.TrimSpace(strings.SplitN(text, "\n", 2)[0])
+	if slashCmdRE.MatchString(firstLine) {
+		for _, prefix := range []string{"/data", "/home", "/usr", "/etc", "/tmp", "/var", "/opt"} {
+			if strings.HasPrefix(firstLine, prefix) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func (p *Prompt) IsTaskNotification() bool {
@@ -217,17 +241,34 @@ func (p *Prompt) Summary() string {
 		return "[cmd] " + m[1]
 	}
 	if m := taskNotificationRE.FindStringSubmatch(p.UserText); m != nil {
-		text := m[1]
+		text := strings.TrimSpace(m[1])
 		runes := []rune(text)
 		if len(runes) > 100 {
 			text = string(runes[:97]) + "..."
 		}
 		return "[bg] " + text
 	}
+	text := strings.TrimSpace(p.UserText)
 	firstLine := ""
-	if p.UserText != "" {
-		lines := strings.SplitN(strings.TrimSpace(p.UserText), "\n", 2)
+	if text != "" {
+		lines := strings.SplitN(text, "\n", 2)
 		firstLine = strings.TrimSpace(lines[0])
+	}
+	if slashCmdRE.MatchString(firstLine) {
+		isPath := false
+		for _, prefix := range []string{"/data", "/home", "/usr", "/etc", "/tmp", "/var", "/opt"} {
+			if strings.HasPrefix(firstLine, prefix) {
+				isPath = true
+				break
+			}
+		}
+		if !isPath {
+			runes := []rune(firstLine)
+			if len(runes) > 100 {
+				firstLine = string(runes[:97]) + "..."
+			}
+			return "[cmd] " + firstLine
+		}
 	}
 	runes := []rune(firstLine)
 	if len(runes) > 100 {
@@ -239,17 +280,30 @@ func (p *Prompt) Summary() string {
 	return firstLine
 }
 
-// Project is one directory under ~/.claude/projects (or a backup mirroring
-// that layout).
+// Project is one project entity with session logs.
 type Project struct {
 	DirPath      string
 	DisplayName  string
 	Cwd          string
 	LastActivity string
 	PromptCount  int
+	Source       string // "claude" | "agy" | "gemini" | "all" | "agy+claude" ...
+	SessionFiles []string
+	ConvMetadata map[string]map[string]string
+}
+
+func (p *Project) GetSessionFiles() []string {
+	if len(p.SessionFiles) > 0 {
+		return p.SessionFiles
+	}
+	return source.ListSessionFiles(p.DirPath)
 }
 
 func (p *Project) LoadPrompts() []Prompt {
+	files := p.GetSessionFiles()
+	if len(files) > 0 {
+		return BuildPromptsForFiles(files, p.ConvMetadata)
+	}
 	return BuildPrompts(p.DirPath)
 }
 
@@ -361,9 +415,90 @@ func usageTokens(rec rawRecord) int64 {
 	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens + u.OutputTokens
 }
 
-// ParseSessionFile returns the Prompts found in a single session jsonl, in
-// file order.
-func ParseSessionFile(path string) []Prompt {
+func cleanToolInput(raw json.RawMessage) []KV {
+	kvs := decodeOrderedTopLevel(raw)
+	for i, kv := range kvs {
+		if s, ok := kv.Value.(string); ok {
+			s = strings.TrimSpace(s)
+			if len(s) >= 2 && strings.HasPrefix(s, "\"") && strings.HasSuffix(s, "\"") {
+				var unquoted string
+				if err := json.Unmarshal([]byte(s), &unquoted); err == nil {
+					kvs[i].Value = unquoted
+				}
+			}
+		}
+	}
+	return kvs
+}
+
+// DetectFileFormat examines the start of a session file to determine its format.
+func DetectFileFormat(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "claude"
+	}
+	defer f.Close()
+
+	buf := make([]byte, 4096)
+	n, _ := io.ReadFull(f, buf)
+	chunk := string(buf[:n])
+	trimmed := strings.TrimSpace(chunk)
+	if strings.HasPrefix(trimmed, "{") {
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(trimmed), &obj); err == nil {
+			if _, ok := obj["messages"]; ok {
+				return "gemini_json"
+			}
+		}
+	}
+
+	lines := strings.Split(chunk, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		rtype, _ := rec["type"].(string)
+		if rtype == "agy_metadata" {
+			return "agy"
+		}
+		if rtype == "gemini_metadata" {
+			return "gemini_jsonl"
+		}
+		if rtype == "USER_INPUT" || rtype == "PLANNER_RESPONSE" || rtype == "LIST_DIRECTORY" || rtype == "VIEW_FILE" {
+			return "agy"
+		}
+		src, _ := rec["source"].(string)
+		if src == "USER_EXPLICIT" || src == "MODEL" {
+			return "agy"
+		}
+		if _, hasMsg := rec["message"]; hasMsg && (rtype == "user" || rtype == "assistant") {
+			return "claude"
+		}
+		if rtype == "gemini" {
+			return "gemini_jsonl"
+		}
+		if rtype == "user" {
+			if _, isList := rec["content"].([]interface{}); isList {
+				return "gemini_jsonl"
+			}
+		}
+		if _, hasHash := rec["projectHash"]; hasHash {
+			return "gemini_jsonl"
+		}
+		if _, hasSet := rec["$set"]; hasSet {
+			return "gemini_jsonl"
+		}
+	}
+	return "claude"
+}
+
+// ParseClaudeSessionFile returns the Prompts found in a single Claude session jsonl.
+func ParseClaudeSessionFile(path string) []Prompt {
 	var prompts []Prompt
 	var current *Prompt
 	sessionID := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
@@ -380,6 +515,7 @@ func ParseSessionFile(path string) []Prompt {
 				Branch:    rec.GitBranch,
 				Sidechain: rec.IsSidechain,
 				UserText:  userText,
+				Source:    "claude",
 			})
 			current = &prompts[len(prompts)-1]
 		} else if rec.Type == "assistant" && current != nil {
@@ -391,27 +527,407 @@ func ParseSessionFile(path string) []Prompt {
 	return prompts
 }
 
-func sessionStartTimestamp(path string) string {
-	ts := ""
-	iterRecords(path, func(rec rawRecord) bool {
-		if rec.Timestamp != "" {
-			ts = rec.Timestamp
-			return false
-		}
-		return true
-	})
-	return ts
+type rawAgyRecord struct {
+	StepIndex int              `json:"step_index"`
+	Source    string           `json:"source"`
+	Type      string           `json:"type"`
+	Status    string           `json:"status"`
+	CreatedAt string           `json:"created_at"`
+	Timestamp string           `json:"timestamp"`
+	Content   string           `json:"content"`
+	ToolCalls []rawAgyToolCall `json:"tool_calls"`
+	GitBranch string           `json:"gitBranch"`
+	SessionID string           `json:"sessionId"`
+	Cwd       string           `json:"cwd"`
 }
 
-// BuildPrompts merges every session file under projectDir into one
-// time-ordered list (oldest session file first; file line order is
-// trusted within a session, see docs/data-model.md).
-func BuildPrompts(projectDir string) []Prompt {
-	files := source.ListSessionFiles(projectDir)
-	// Compute each file's start timestamp once up front -- sort.Slice's
-	// comparator can invoke itself far more than len(files) times during an
-	// O(n log n) sort, and recomputing sessionStartTimestamp (a file read)
-	// inside it turns one file scan into many.
+type rawAgyToolCall struct {
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args"`
+}
+
+// ParseAgyTranscriptFile returns Prompts found in an AGY transcript jsonl file.
+func ParseAgyTranscriptFile(path string, sessionID, defaultBranch string) []Prompt {
+	var prompts []Prompt
+	var current *Prompt
+	branch := defaultBranch
+	sid := sessionID
+	if sid == "" {
+		parent := filepath.Dir(path)
+		if filepath.Base(parent) == "logs" {
+			pdir := filepath.Dir(parent)
+			if filepath.Base(pdir) == ".system_generated" {
+				sid = filepath.Base(filepath.Dir(pdir))
+			}
+		}
+	}
+	if sid == "" || sid == "brain" {
+		sid = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	if strings.HasPrefix(sid, "agy-") {
+		sid = sid[4:]
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return prompts
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
+
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var rec rawAgyRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			continue
+		}
+
+		if rec.Type == "agy_metadata" {
+			if rec.GitBranch != "" {
+				branch = rec.GitBranch
+			}
+			if rec.SessionID != "" {
+				sid = rec.SessionID
+			}
+			continue
+		}
+
+		if rec.Type == "USER_INPUT" || (rec.Source == "USER_EXPLICIT" && rec.Content != "") {
+			content := rec.Content
+			userText := ""
+			if m := userRequestRE.FindStringSubmatch(content); m != nil {
+				userText = strings.TrimSpace(m[1])
+			} else {
+				clean := additionalMetaRE.ReplaceAllString(content, "")
+				clean = userSettingsRE.ReplaceAllString(clean, "")
+				userText = strings.TrimSpace(clean)
+			}
+			ts := rec.CreatedAt
+			if ts == "" {
+				ts = rec.Timestamp
+			}
+			prompts = append(prompts, Prompt{
+				SessionID: sid,
+				Timestamp: ts,
+				Branch:    branch,
+				Sidechain: false,
+				UserText:  userText,
+				Source:    "agy",
+			})
+			current = &prompts[len(prompts)-1]
+		} else if rec.Type == "PLANNER_RESPONSE" && current != nil {
+			for _, tc := range rec.ToolCalls {
+				tname := tc.Name
+				if tname == "" {
+					tname = "?"
+				}
+				kvs := cleanToolInput(tc.Args)
+				current.Blocks = append(current.Blocks, AssistantBlock{
+					Kind:      "tool_use",
+					ToolName:  tname,
+					ToolInput: kvs,
+				})
+			}
+			if rec.Content != "" {
+				current.Blocks = append(current.Blocks, AssistantBlock{
+					Kind: "text",
+					Text: rec.Content,
+				})
+			}
+		}
+	}
+	return prompts
+}
+
+// ParseGeminiJsonFile parses legacy Gemini CLI session from a JSON file.
+func ParseGeminiJsonFile(path string) []Prompt {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var doc struct {
+		SessionID string `json:"sessionId"`
+		Messages  []struct {
+			Type      string          `json:"type"`
+			Timestamp string          `json:"timestamp"`
+			Content   json.RawMessage `json:"content"`
+			Tokens    struct {
+				Total int64 `json:"total"`
+			} `json:"tokens"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil
+	}
+
+	sessionID := doc.SessionID
+	if sessionID == "" {
+		sessionID = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	var prompts []Prompt
+	var current *Prompt
+
+	for _, msg := range doc.Messages {
+		if msg.Type == "user" {
+			var texts []string
+			var list []interface{}
+			if err := json.Unmarshal(msg.Content, &list); err == nil {
+				for _, item := range list {
+					if m, ok := item.(map[string]interface{}); ok {
+						if t, ok := m["text"].(string); ok {
+							texts = append(texts, t)
+						}
+					} else if s, ok := item.(string); ok {
+						texts = append(texts, s)
+					}
+				}
+			} else {
+				var s string
+				if err := json.Unmarshal(msg.Content, &s); err == nil {
+					texts = append(texts, s)
+				}
+			}
+			prompts = append(prompts, Prompt{
+				SessionID: sessionID,
+				Timestamp: msg.Timestamp,
+				UserText:  strings.Join(texts, "\n"),
+				Source:    "gemini",
+			})
+			current = &prompts[len(prompts)-1]
+		} else if msg.Type == "gemini" && current != nil {
+			var s string
+			if err := json.Unmarshal(msg.Content, &s); err == nil && s != "" {
+				current.Blocks = append(current.Blocks, AssistantBlock{Kind: "text", Text: s})
+			}
+			current.TotalTokens += msg.Tokens.Total
+		}
+	}
+	return prompts
+}
+
+// ParseGeminiJsonlFile parses legacy Gemini CLI session from a JSONL file.
+func ParseGeminiJsonlFile(path string) []Prompt {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	sessionID := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	var prompts []Prompt
+	var current *Prompt
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
+
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var rec struct {
+			Type      string `json:"type"`
+			SessionID string `json:"sessionId"`
+			StartTime string `json:"startTime"`
+			Timestamp string `json:"timestamp"`
+			Set       *struct {
+				Messages []struct {
+					Type      string          `json:"type"`
+					Timestamp string          `json:"timestamp"`
+					Content   json.RawMessage `json:"content"`
+					Tokens    struct {
+						Total int64 `json:"total"`
+					} `json:"tokens"`
+				} `json:"messages"`
+			} `json:"$set"`
+			Content json.RawMessage `json:"content"`
+			Tokens  *struct {
+				Total int64 `json:"total"`
+			} `json:"tokens"`
+		}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			continue
+		}
+
+		if rec.Type == "gemini_metadata" && rec.SessionID != "" {
+			sessionID = rec.SessionID
+			continue
+		}
+		if rec.SessionID != "" && rec.StartTime != "" {
+			sessionID = rec.SessionID
+			continue
+		}
+		if rec.Set != nil {
+			for _, msg := range rec.Set.Messages {
+				if msg.Type == "user" {
+					var texts []string
+					var list []interface{}
+					if err := json.Unmarshal(msg.Content, &list); err == nil {
+						for _, item := range list {
+							if m, ok := item.(map[string]interface{}); ok {
+								if t, ok := m["text"].(string); ok {
+									texts = append(texts, t)
+								}
+							} else if s, ok := item.(string); ok {
+								texts = append(texts, s)
+							}
+						}
+					} else {
+						var s string
+						if err := json.Unmarshal(msg.Content, &s); err == nil {
+							texts = append(texts, s)
+						}
+					}
+					prompts = append(prompts, Prompt{
+						SessionID: sessionID,
+						Timestamp: msg.Timestamp,
+						UserText:  strings.Join(texts, "\n"),
+						Source:    "gemini",
+					})
+					current = &prompts[len(prompts)-1]
+				} else if msg.Type == "gemini" && current != nil {
+					var s string
+					if err := json.Unmarshal(msg.Content, &s); err == nil && s != "" {
+						current.Blocks = append(current.Blocks, AssistantBlock{Kind: "text", Text: s})
+					}
+					current.TotalTokens += msg.Tokens.Total
+				}
+			}
+			continue
+		}
+
+		if rec.Type == "user" {
+			var texts []string
+			var list []interface{}
+			if err := json.Unmarshal(rec.Content, &list); err == nil {
+				for _, item := range list {
+					if m, ok := item.(map[string]interface{}); ok {
+						if t, ok := m["text"].(string); ok {
+							texts = append(texts, t)
+						}
+					} else if s, ok := item.(string); ok {
+						texts = append(texts, s)
+					}
+				}
+			} else {
+				var s string
+				if err := json.Unmarshal(rec.Content, &s); err == nil {
+					texts = append(texts, s)
+				}
+			}
+			prompts = append(prompts, Prompt{
+				SessionID: sessionID,
+				Timestamp: rec.Timestamp,
+				UserText:  strings.Join(texts, "\n"),
+				Source:    "gemini",
+			})
+			current = &prompts[len(prompts)-1]
+		} else if rec.Type == "gemini" && current != nil {
+			var s string
+			if err := json.Unmarshal(rec.Content, &s); err == nil && s != "" {
+				current.Blocks = append(current.Blocks, AssistantBlock{Kind: "text", Text: s})
+			}
+			if rec.Tokens != nil {
+				current.TotalTokens += rec.Tokens.Total
+			}
+		}
+	}
+	return prompts
+}
+
+// ParseSessionFile returns the Prompts found in a session file according to detected format.
+func ParseSessionFile(path string, defaultBranch, sessionID string) []Prompt {
+	fmtType := DetectFileFormat(path)
+	switch fmtType {
+	case "agy":
+		return ParseAgyTranscriptFile(path, sessionID, defaultBranch)
+	case "gemini_json":
+		return ParseGeminiJsonFile(path)
+	case "gemini_jsonl":
+		return ParseGeminiJsonlFile(path)
+	default:
+		return ParseClaudeSessionFile(path)
+	}
+}
+
+func formatTimestamp(val interface{}) string {
+	if val == nil {
+		return ""
+	}
+	switch v := val.(type) {
+	case string:
+		return v
+	case float64:
+		if v > 100_000_000_000 {
+			v /= 1000.0
+		}
+		sec := int64(v)
+		nsec := int64((v - float64(sec)) * 1e9)
+		return time.Unix(sec, nsec).UTC().Format(time.RFC3339)
+	case json.Number:
+		if f, err := v.Float64(); err == nil {
+			return formatTimestamp(f)
+		}
+		return v.String()
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func sessionStartTimestamp(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	buf := make([]byte, 4096)
+	n, _ := io.ReadFull(f, buf)
+	chunk := string(buf[:n])
+	trimmed := strings.TrimSpace(chunk)
+	if strings.HasPrefix(trimmed, "{") {
+		var doc struct {
+			Messages []struct {
+				Timestamp interface{} `json:"timestamp"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &doc); err == nil && len(doc.Messages) > 0 {
+			return formatTimestamp(doc.Messages[0].Timestamp)
+		}
+	}
+
+	lines := strings.Split(chunk, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec map[string]interface{}
+		dec := json.NewDecoder(strings.NewReader(line))
+		dec.UseNumber()
+		if err := dec.Decode(&rec); err != nil {
+			continue
+		}
+		if ts, ok := rec["timestamp"]; ok && ts != nil && ts != "" {
+			return formatTimestamp(ts)
+		}
+		if ca, ok := rec["created_at"]; ok && ca != nil && ca != "" {
+			return formatTimestamp(ca)
+		}
+		if st, ok := rec["startTime"]; ok && st != nil && st != "" {
+			return formatTimestamp(st)
+		}
+	}
+	return ""
+}
+
+// BuildPromptsForFiles merges the given session files into one time-ordered list.
+func BuildPromptsForFiles(files []string, convMeta map[string]map[string]string) []Prompt {
 	timestamps := make([]string, len(files))
 	for i, f := range files {
 		timestamps[i] = sessionStartTimestamp(f)
@@ -423,13 +939,44 @@ func BuildPrompts(projectDir string) []Prompt {
 	sort.Slice(order, func(i, j int) bool {
 		return timestamps[order[i]] < timestamps[order[j]]
 	})
+
 	var prompts []Prompt
 	for _, idx := range order {
-		prompts = append(prompts, ParseSessionFile(files[idx])...)
+		f := files[idx]
+		stem := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
+		meta := convMeta[stem]
+		if meta == nil {
+			dir := filepath.Dir(f)
+			if filepath.Base(dir) == "logs" {
+				pdir := filepath.Dir(dir)
+				if filepath.Base(pdir) == ".system_generated" {
+					convID := filepath.Base(filepath.Dir(pdir))
+					meta = convMeta[convID]
+				}
+			}
+		}
+		branch := ""
+		sid := stem
+		if meta != nil {
+			if b := meta["branch"]; b != "" {
+				branch = b
+			}
+			if id := meta["id"]; id != "" {
+				sid = id
+			}
+		}
+		prompts = append(prompts, ParseSessionFile(f, branch, sid)...)
 	}
 	return prompts
 }
 
+// BuildPrompts merges every session file under projectDir into one time-ordered list.
+func BuildPrompts(projectDir string) []Prompt {
+	files := source.ListSessionFiles(projectDir)
+	return BuildPromptsForFiles(files, nil)
+}
+
+// FindCwdField finds the cwd recorded in session files under projectDir.
 func FindCwdField(projectDir string) string {
 	for _, f := range source.ListSessionFiles(projectDir) {
 		cwd := ""
@@ -447,36 +994,278 @@ func FindCwdField(projectDir string) string {
 	return ""
 }
 
-// LoadProject builds a Project summary (display name, last activity, prompt
-// count) for projectDir without keeping the full prompt list in memory.
-func LoadProject(projectDir string) Project {
-	cwd := FindCwdField(projectDir)
-	displayName := filepath.Base(projectDir)
-	if cwd != "" {
-		displayName = filepath.Base(cwd)
+// LoadProjectWithFilter loads a Project respecting the source filter.
+func LoadProjectWithFilter(target, sourceFilter string) Project {
+	files := source.ListSessionFiles(target)
+	if len(files) > 0 {
+		cwd := FindCwdField(target)
+		displayName := filepath.Base(target)
+		if cwd != "" {
+			displayName = filepath.Base(cwd)
+		}
+		lastActivity := ""
+		for _, f := range files {
+			if ts := sessionStartTimestamp(f); ts > lastActivity {
+				lastActivity = ts
+			}
+		}
+		prompts := BuildPromptsForFiles(files, nil)
+		return Project{
+			DirPath:      target,
+			DisplayName:  displayName,
+			Cwd:          cwd,
+			LastActivity: lastActivity,
+			PromptCount:  len(prompts),
+			Source:       sourceFilter,
+			SessionFiles: files,
+		}
 	}
-	files := source.ListSessionFiles(projectDir)
+
+	info := source.FindDirectProjectInfo(target, sourceFilter)
+	var allFiles []string
+	metadata := make(map[string]map[string]string)
+	sourcesFound := make(map[string]bool)
+
+	for _, f := range info.ClaudeFiles {
+		allFiles = append(allFiles, f)
+		sourcesFound["claude"] = true
+	}
+
+	for _, c := range info.AgyConvs {
+		if c.TranscriptPath != "" {
+			allFiles = append(allFiles, c.TranscriptPath)
+			m := map[string]string{
+				"id":        c.ID,
+				"workspace": c.Workspace,
+				"branch":    c.Branch,
+				"title":     c.Title,
+			}
+			metadata[c.ID] = m
+			tstem := strings.TrimSuffix(filepath.Base(c.TranscriptPath), filepath.Ext(c.TranscriptPath))
+			metadata[tstem] = m
+			sourcesFound["agy"] = true
+		}
+	}
+
+	for _, gf := range info.GeminiFiles {
+		allFiles = append(allFiles, gf)
+		sourcesFound["gemini"] = true
+	}
+
+	var srcKeys []string
+	for k := range sourcesFound {
+		srcKeys = append(srcKeys, k)
+	}
+	sort.Strings(srcKeys)
+	srcLabel := strings.Join(srcKeys, "+")
+	if srcLabel == "" {
+		if sourceFilter == "claude" {
+			srcLabel = "claude"
+		} else {
+			srcLabel = "agy"
+		}
+	}
+
 	lastActivity := ""
-	for _, f := range files {
+	for _, f := range allFiles {
 		if ts := sessionStartTimestamp(f); ts > lastActivity {
 			lastActivity = ts
 		}
 	}
-	return Project{
-		DirPath:      projectDir,
-		DisplayName:  displayName,
-		Cwd:          cwd,
-		LastActivity: lastActivity,
-		PromptCount:  len(BuildPrompts(projectDir)),
+	prompts := BuildPromptsForFiles(allFiles, metadata)
+
+	dispName := info.DisplayName
+	if dispName == "" {
+		dispName = filepath.Base(target)
 	}
+	cwdStr := info.Cwd
+	if cwdStr == "" {
+		cwdStr = target
+	}
+
+	return Project{
+		DirPath:      target,
+		DisplayName:  dispName,
+		Cwd:          cwdStr,
+		LastActivity: lastActivity,
+		PromptCount:  len(prompts),
+		Source:       srcLabel,
+		SessionFiles: allFiles,
+		ConvMetadata: metadata,
+	}
+}
+
+// LoadProject builds a Project summary for projectDir.
+func LoadProject(projectDir string) Project {
+	return LoadProjectWithFilter(projectDir, "all")
+}
+
+// LoadProjectsWithFilter returns all projects across sources or from aggregateRoot.
+func LoadProjectsWithFilter(aggregateRoot, sourceFilter string) []Project {
+	home, _ := os.UserHomeDir()
+	claudeDir := source.ClaudeProjectsDir()
+
+	// 1. Custom aggregate root (e.g. backup directory)
+	if aggregateRoot != "" && aggregateRoot != claudeDir && aggregateRoot != home {
+		dirs := source.ListProjectDirs(aggregateRoot)
+		out := make([]Project, 0, len(dirs))
+		for _, d := range dirs {
+			out = append(out, LoadProjectWithFilter(d, sourceFilter))
+		}
+		return out
+	}
+
+	// 2. Claude-only aggregate
+	if sourceFilter == "claude" {
+		dirs := source.ListProjectDirs(claudeDir)
+		out := make([]Project, 0, len(dirs))
+		for _, d := range dirs {
+			out = append(out, LoadProjectWithFilter(d, "claude"))
+		}
+		return out
+	}
+
+	// 3. Global multi-source aggregate (Claude + AGY + Gemini)
+	includeClaude := sourceFilter == "all" || sourceFilter == "claude"
+	includeAgy := sourceFilter == "all" || sourceFilter == "agy" || sourceFilter == "gemini"
+
+	type wsEntry struct {
+		cwd         string
+		displayName string
+		claudeFiles []string
+		agyConvs    []source.AgyConvInfo
+		geminiFiles []string
+		metadata    map[string]map[string]string
+	}
+	projectsByWS := make(map[string]*wsEntry)
+	getOrCreate := func(ws string) *wsEntry {
+		e, ok := projectsByWS[ws]
+		if !ok {
+			e = &wsEntry{
+				cwd:         ws,
+				displayName: filepath.Base(ws),
+				metadata:    make(map[string]map[string]string),
+			}
+			projectsByWS[ws] = e
+		}
+		return e
+	}
+
+	if includeClaude {
+		if fi, err := os.Stat(claudeDir); err == nil && fi.IsDir() {
+			for _, pdir := range source.ListProjectDirs(claudeDir) {
+				cFiles := source.ListSessionFiles(pdir)
+				if len(cFiles) == 0 {
+					continue
+				}
+				cwd := FindCwdField(pdir)
+				if cwd == "" {
+					cwd = pdir
+				}
+				e := getOrCreate(cwd)
+				e.claudeFiles = append(e.claudeFiles, cFiles...)
+			}
+		}
+	}
+
+	if includeAgy {
+		for _, c := range source.ScanAgyConversations("") {
+			ws := c.Workspace
+			if ws == "" {
+				ws = "agy-" + c.ID
+				if len(ws) > 12 {
+					ws = ws[:12]
+				}
+			}
+			e := getOrCreate(ws)
+			e.agyConvs = append(e.agyConvs, c)
+			e.metadata[c.ID] = map[string]string{
+				"id":        c.ID,
+				"workspace": c.Workspace,
+				"branch":    c.Branch,
+				"title":     c.Title,
+			}
+		}
+
+		for _, g := range source.ScanGeminiTmpProjects("") {
+			ws := g.Workspace
+			if ws == "" {
+				ws = g.DirName
+			}
+			e := getOrCreate(ws)
+			e.geminiFiles = append(e.geminiFiles, g.ChatFiles...)
+		}
+	}
+
+	var sortedWS []string
+	for ws := range projectsByWS {
+		sortedWS = append(sortedWS, ws)
+	}
+	sort.Strings(sortedWS)
+
+	var out []Project
+	for _, ws := range sortedWS {
+		entry := projectsByWS[ws]
+		var allFiles []string
+		sourcesFound := make(map[string]bool)
+
+		for _, f := range entry.claudeFiles {
+			allFiles = append(allFiles, f)
+			sourcesFound["claude"] = true
+		}
+		for _, c := range entry.agyConvs {
+			if c.TranscriptPath != "" {
+				allFiles = append(allFiles, c.TranscriptPath)
+				tstem := strings.TrimSuffix(filepath.Base(c.TranscriptPath), filepath.Ext(c.TranscriptPath))
+				entry.metadata[tstem] = entry.metadata[c.ID]
+				sourcesFound["agy"] = true
+			}
+		}
+		for _, gf := range entry.geminiFiles {
+			allFiles = append(allFiles, gf)
+			sourcesFound["gemini"] = true
+		}
+
+		if len(allFiles) == 0 {
+			continue
+		}
+
+		var srcKeys []string
+		for k := range sourcesFound {
+			srcKeys = append(srcKeys, k)
+		}
+		sort.Strings(srcKeys)
+		srcLabel := strings.Join(srcKeys, "+")
+
+		lastActivity := ""
+		for _, f := range allFiles {
+			if ts := sessionStartTimestamp(f); ts > lastActivity {
+				lastActivity = ts
+			}
+		}
+		prompts := BuildPromptsForFiles(allFiles, entry.metadata)
+
+		pdir := ws
+		if len(entry.claudeFiles) > 0 {
+			pdir = filepath.Dir(entry.claudeFiles[0])
+		}
+
+		out = append(out, Project{
+			DirPath:      pdir,
+			DisplayName:  entry.displayName,
+			Cwd:          entry.cwd,
+			LastActivity: lastActivity,
+			PromptCount:  len(prompts),
+			Source:       srcLabel,
+			SessionFiles: allFiles,
+			ConvMetadata: entry.metadata,
+		})
+	}
+
+	return out
 }
 
 // LoadProjects returns one Project per subdirectory of aggregateRoot.
 func LoadProjects(aggregateRoot string) []Project {
-	dirs := source.ListProjectDirs(aggregateRoot)
-	out := make([]Project, 0, len(dirs))
-	for _, d := range dirs {
-		out = append(out, LoadProject(d))
-	}
-	return out
+	return LoadProjectsWithFilter(aggregateRoot, "all")
 }

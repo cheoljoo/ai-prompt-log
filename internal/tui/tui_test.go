@@ -102,10 +102,17 @@ func TestAggregateModeRealData(t *testing.T) {
 	m = update(m, tea.WindowSizeMsg{Width: 200, Height: 45})
 
 	realDirs := source.ListProjectDirs(source.ClaudeProjectsDir())
-	if len(m.projects) != len(realDirs) {
-		t.Fatalf("expected %d real projects, got %d", len(realDirs), len(m.projects))
+	if len(m.projects) < len(realDirs) {
+		t.Fatalf("expected at least %d real projects, got %d", len(realDirs), len(m.projects))
 	}
-	t.Logf("aggregate project count: %d", len(m.projects))
+	t.Logf("aggregate project count (all): %d", len(m.projects))
+
+	// Also verify claude-only aggregate matches realDirs exactly
+	mClaude := NewWithFilter(mode, dir, "claude")
+	if len(mClaude.projects) != len(realDirs) {
+		t.Fatalf("expected %d claude projects, got %d", len(realDirs), len(mClaude.projects))
+	}
+	t.Logf("aggregate project count (claude): %d", len(mClaude.projects))
 
 	if m.focus != paneProjects {
 		t.Fatalf("expected initial focus on projects pane, got %v", m.focus)
@@ -185,9 +192,9 @@ func TestQuit(t *testing.T) {
 func TestViewBackupRealData(t *testing.T) {
 	backupDir := t.TempDir()
 	depth := 1
-	stats := backup.Run("/data01/cheoljoo.lee/code/ai-prompt-log", &depth, backupDir)
+	stats := backup.RunWithFilter("/data01/cheoljoo.lee/code/ai-prompt-log", &depth, backupDir, "claude")
 	if stats.Projects != 16 {
-		t.Fatalf("expected backup.Run to find 16 real projects, got %d", stats.Projects)
+		t.Fatalf("expected backup.RunWithFilter(claude) to find 16 real projects, got %d", stats.Projects)
 	}
 
 	m := DetectAndNew("/data01/cheoljoo.lee/code/ai-prompt-log", false, backupDir)

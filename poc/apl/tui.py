@@ -93,6 +93,9 @@ def format_prompt_detail(prompt: model.Prompt) -> str:
     (see agents/B-poc.md).
     """
     meta = [f"[dim]{escape(prompt.timestamp)}[/dim]"]
+    if prompt.source:
+        src_color = "green" if prompt.source == "agy" else ("blue" if prompt.source == "gemini" else "cyan")
+        meta.append(f"[{src_color}]{escape(prompt.source)}[/{src_color}]")
     if prompt.branch:
         meta.append(f"[magenta]{escape(prompt.branch)}[/magenta]")
     if prompt.total_tokens:
@@ -168,10 +171,11 @@ class AplScreen(Screen):
 
     CHANGE_CHECK_INTERVAL_SECONDS = 30
 
-    def __init__(self, mode: str, root_dir: Path):
+    def __init__(self, mode: str, root_dir: Path, source_filter: str = "all"):
         super().__init__()
         self.mode = mode
         self.root_dir = root_dir
+        self.source_filter = source_filter
         self._projects: list = []
         self._current_prompts: list = []
         self._current_project: model.Project | None = None
@@ -191,6 +195,7 @@ class AplScreen(Screen):
         prompts_table = self.query_one("#prompts-table", DataTable)
         prompts_table.cursor_type = "row"
         prompts_table.add_column("Date")
+        prompts_table.add_column("Source")
         prompts_table.add_column("Branch")
         prompts_table.add_column("Tokens")
         prompts_table.add_column("Tag")
@@ -202,13 +207,16 @@ class AplScreen(Screen):
             projects_table = self.query_one("#projects-table", DataTable)
             projects_table.cursor_type = "row"
             projects_table.add_column("Project")
+            projects_table.add_column("Source")
             projects_table.add_column("Prompts")
             projects_table.add_column("Last activity")
             projects_table.border_title = "Projects"
-            self._projects = model.load_projects(self.root_dir)
+            self._projects = model.load_projects(self.root_dir, source_filter=self.source_filter)
             for idx, p in enumerate(self._projects):
+                src_style = "green" if p.source == "agy" else ("cyan" if p.source == "claude" else "dim")
                 projects_table.add_row(
                     Text(p.display_name, style="bold cyan"),
+                    Text(p.source, style=src_style),
                     Text(str(p.prompt_count), style="dim"),
                     Text(p.last_activity[:19] or "-", style=_recency_style(p.last_activity)),
                     key=str(idx),
@@ -217,7 +225,7 @@ class AplScreen(Screen):
             if self._projects:
                 self._load_prompts_for(self._projects[0])
         else:
-            project = model.load_project(self.root_dir)
+            project = model.load_project(self.root_dir, source_filter=self.source_filter)
             self._load_prompts_for(project)
             prompts_table.focus()
 
@@ -226,7 +234,7 @@ class AplScreen(Screen):
     @staticmethod
     def _snapshot_mtimes(project: model.Project) -> dict:
         mtimes = {}
-        for f in source.list_session_files(project.dir_path):
+        for f in project.get_session_files():
             try:
                 mtimes[str(f)] = f.stat().st_mtime
             except OSError:
@@ -254,7 +262,9 @@ class AplScreen(Screen):
             return
         # re-derive the project from its own directory so prompt_count/
         # last_activity are recomputed too, not just the prompt list
-        refreshed = model.load_project(self._current_project.dir_path)
+        refreshed = model.load_project(
+            self._current_project.dir_path, source_filter=self.source_filter
+        )
         self._load_prompts_for(refreshed)
         if self.mode == "aggregate":
             for idx, p in enumerate(self._projects):
@@ -284,8 +294,10 @@ class AplScreen(Screen):
                 tag = "[subagent]"
             else:
                 tag = ""
+            src_style = "green" if p.source == "agy" else ("blue" if p.source == "gemini" else "cyan")
             table.add_row(
                 Text(p.timestamp[:19] or "-", style="dim"),
+                Text(p.source or "claude", style=src_style),
                 Text(p.branch or "-", style="magenta"),
                 Text(_format_tokens(p.total_tokens), style="blue"),
                 Text(tag, style="yellow"),
@@ -394,7 +406,7 @@ class AplApp(App):
         border: heavy $accent;
     }
     #projects-table {
-        width: 28;
+        width: 38;
     }
     #prompts-table {
         width: 45%;
@@ -404,11 +416,22 @@ class AplApp(App):
     }
     """
 
-    def __init__(self, aggregate: bool = False, root_override: Path | None = None):
+    def __init__(
+        self,
+        aggregate: bool = False,
+        root_override: Path | None = None,
+        source_filter: str = "all",
+    ):
         super().__init__()
+        self.source_filter = source_filter
         self.mode, self.root_dir = source.detect_mode(
-            Path.cwd(), aggregate=aggregate, root_override=root_override
+            Path.cwd(),
+            aggregate=aggregate,
+            root_override=root_override,
+            source_filter=source_filter,
         )
 
     def on_mount(self) -> None:
-        self.push_screen(AplScreen(self.mode, self.root_dir))
+        self.push_screen(
+            AplScreen(self.mode, self.root_dir, source_filter=self.source_filter)
+        )

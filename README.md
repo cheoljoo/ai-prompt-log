@@ -1,12 +1,14 @@
-# apl — AI Prompt Log viewer for Claude Code
+# apl — AI Prompt Log viewer for Claude Code & Antigravity CLI (agy)
 
-A `tig`-style terminal viewer for [**Claude Code**](https://claude.com/claude-code) (Anthropic's CLI coding agent) session logs. `apl` reads the JSONL session files Claude Code already writes locally to `~/.claude/projects/` — no separate logging, no database, no API keys, nothing to configure.
+A `tig`-style terminal viewer for [**Claude Code**](https://claude.com/claude-code) and [**Antigravity CLI**](https://github.com/google-deepmind) (`agy` / Gemini) session logs. `apl` reads the local session files directly (`~/.claude/projects/` and `~/.gemini/antigravity-cli/`) — no separate logging, no database, no API keys, nothing to configure.
 
-> **Compatibility**: built specifically for Claude Code's local session-log format (`~/.claude/projects/**/*.jsonl`), verified against real logs from Claude Code CLI versions in the 2.x line (see [`docs/data-model.md`](docs/data-model.md)). It does not read logs from claude.ai (the web/desktop chat app), the Claude API, or other AI coding tools. This is an independent, unofficial tool — not built or endorsed by Anthropic.
+> **Compatibility**: built for Claude Code's local session-log format (`~/.claude/projects/**/*.jsonl`) and Antigravity CLI (`~/.gemini/antigravity-cli/brain/**/transcript.jsonl` + `~/.gemini/tmp/`), verified against real logs (see [`docs/data-model.md`](docs/data-model.md)). This is an independent, unofficial tool.
 
 ```
 apl               # this project's own prompts only   -> 2 panes: Prompts | Detail
 apl --all         # every project you've used         -> 3 panes: Projects | Prompts | Detail
+apl --agy         # view only Antigravity CLI (agy) prompts
+apl --claude      # view only Claude Code prompts
 apl --backup      # copy session logs to a durable backup dir (survives deleting the project)
 apl --view-backup # browse that backup                -> 3 panes, same as --all
 ```
@@ -57,12 +59,15 @@ This puts `apl` on your `PATH` (via `uv`'s tool bin directory). Since it's an ed
 
 ```sh
 cd ~/code/some-project
-apl              # browse just this project's prompts (2 panes)
+apl              # browse this project's prompts (both Claude Code & AGY)
+apl --agy        # browse only Antigravity CLI (agy) prompts
+apl --claude     # browse only Claude Code prompts
 
-apl --all        # browse every project under ~/.claude/projects (3 panes)
+apl --all        # browse every project across ~/.claude/projects and ~/.gemini (3 panes)
+apl --all --agy  # browse all projects with agy sessions only
 apl --help       # usage, keybindings, this repo's URL
 
-apl --backup                  # back up just the current project
+apl --backup                  # back up current project (Claude + AGY)
 apl --backup --depth 1        # + every sibling project under the parent directory
 apl --backup --backup-dir PATH  # use a custom backup location (default: ~/ai-prompt-log.backup/)
 apl --view-backup              # browse a previous --backup (3 panes, like --all)
