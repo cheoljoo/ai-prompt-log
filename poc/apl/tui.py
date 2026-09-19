@@ -276,7 +276,14 @@ class AplScreen(Screen):
             self.query_one("#detail-pane", DetailPane).show(None)
             return
         for idx, p in enumerate(self._current_prompts):
-            tag = "[cmd]" if p.is_command else ("[subagent]" if p.sidechain else "")
+            if p.is_command:
+                tag = "[cmd]"
+            elif p.is_task_notification:
+                tag = "[bg]"
+            elif p.sidechain:
+                tag = "[subagent]"
+            else:
+                tag = ""
             table.add_row(
                 Text(p.timestamp[:19] or "-", style="dim"),
                 Text(p.branch or "-", style="magenta"),

@@ -18,6 +18,7 @@ Panes are shown side by side and update live as you move the cursor — no scree
 │ ai-prompt-log    ││ 2026-09-16 11:53  main  ...  ││ USER  2026-09-16 11:53:07        │
 │ llm_wiki         ││ 2026-09-15 18:20  main  ...  ││ apl tool을 만들어주세요...        │
 │ hermes           ││ 2026-09-14 09:02 [subagent]  ││                                  │
+│                  ││ 2026-09-14 08:47 [bg]        ││                                  │
 │ ...              ││ ...                          ││ ASSISTANT                        │
 │                  ││                              ││   ▸ TOOL  Bash                   │
 │                  ││                              ││     command: ls -la ...          │

@@ -106,3 +106,9 @@ Go 1.23.4(공식 바이너리 배포판 직접 설치 — 이 환경의 Homebrew
 - bubbletea에는 Textual의 `notify()` 같은 토스트가 없어 `checkChangesMsg` + `tea.Tick(30s, ...)`로 주기적 백그라운드 체크를 구현하고, footer 줄 앞에 `statusMessage`를 노란색(`styleYellow`)으로 붙여 알림을 표시 — Textual의 `border_subtitle`/토스트 역할을 footer 상태 줄로 대체. 이때도 **자동 reload는 하지 않음**(Python과 동일하게 `Ctrl+L`이 유일한 reload 트리거).
 - `go test ./internal/tui/...`에 `TestReloadRealData` 추가: `backup.Run()`으로 실제 프로젝트 데이터를 격리된 임시 디렉터리에 복사해(운영 중인 `~/.claude/projects`는 건드리지 않음) no-op reload, 30초 주기 체크의 변경 감지(reload는 안 함), `Ctrl+L`로 실제 reload까지 전부 헤드리스로 검증. `go build`/`go vet`/`go test ./...`/`gofmt -l .` 전부 통과.
 
+## 백그라운드/비동기 알림에 `[bg]` 태그 (Python과 동일하게)
+
+`/btw`(fork), 백그라운드 Bash 명령, Monitor 감시 등의 완료 알림이 `<task-notification>...<summary>...</summary>...</task-notification>`로 감싸여 `type:"user"` + 문자열 content로 세션에 재주입되는데, 기존 prompt 경계 규칙을 그대로 만족해 이미 prompt로 잡히고 있었지만 요약이 `<task-notification>` 여는 태그 그대로 나왔다. `taskNotificationRE` + `Prompt.IsTaskNotification()`을 추가해 `<summary>` 태그 내용을 요약으로 뽑고 `[bg]` 태그를 붙이도록 수정(`commandRE`/`[cmd]`와 같은 우선순위, 그다음 체크).
+
+`go test ./internal/tui/...`에 `TestTaskNotificationTagRealData` 추가 — 이 프로젝트 자신의 세션 로그에 이미 실존하는 `[bg]` 대상 3건(백그라운드 Bash 명령 완료, 끊긴 백그라운드 명령 알림, `/btw` fork 답변)을 실제로 로드해 전부 `[bg] `로 시작하고 raw `<task-notification>` 태그가 노출되지 않는지 검증. `go build`/`go vet`/`gofmt -l .`/`go test ./...` 전부 통과.
+
