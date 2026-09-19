@@ -39,13 +39,13 @@ def build_parser() -> argparse.ArgumentParser:
         prog="apl",
         description=(
             "apl (AI Prompt Log viewer) - a tig-style TUI for browsing "
-            "Claude Code session logs, read directly from "
-            "~/.claude/projects (no copying).\n\n"
+            "Claude Code and Antigravity CLI (agy / gemini) session logs, read directly "
+            "from ~/.claude/projects and ~/.gemini/antigravity-cli (no copying).\n\n"
             "Plain `apl` shows just the current project's own prompts "
             "(2 panes: Prompts | Detail). `apl --all` shows every project "
             "at once (3 panes: Projects | Prompts | Detail).\n\n"
             "`apl --backup` copies session logs into a durable backup "
-            "directory (outside ~/.claude/projects, so it survives a "
+            "directory (outside live directories, so it survives a "
             "project directory being deleted). `apl --view-backup` browses "
             "that backup with the same 3-pane view."
         ),
@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-a",
         "--all",
         action="store_true",
-        help="Browse every project under ~/.claude/projects (3-pane aggregate view)",
+        help="Browse every project (3-pane aggregate view)",
     )
     mode.add_argument(
         "--backup",
@@ -97,6 +97,31 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Backup directory for --backup / --view-backup (default: ~/ai-prompt-log.backup/)",
     )
+
+    source_grp = parser.add_mutually_exclusive_group()
+    source_grp.add_argument(
+        "-s",
+        "--source",
+        choices=["all", "claude", "agy", "gemini"],
+        default=None,
+        help="AI assistant log source to display (default: all available)",
+    )
+    source_grp.add_argument(
+        "--agy",
+        action="store_true",
+        help="Display only Antigravity CLI (agy) logs",
+    )
+    source_grp.add_argument(
+        "--claude",
+        action="store_true",
+        help="Display only Claude Code logs",
+    )
+    source_grp.add_argument(
+        "--gemini",
+        action="store_true",
+        help="Display only Antigravity / Gemini CLI logs (alias for --agy)",
+    )
+
     return parser
 
 
@@ -109,17 +134,27 @@ def main() -> None:
     if args.backup_dir is not None and not (args.backup or args.view_backup):
         parser.error("--backup-dir only makes sense with --backup or --view-backup")
 
+    if args.agy or args.gemini:
+        source_filter = "agy"
+    elif args.claude:
+        source_filter = "claude"
+    elif args.source:
+        source_filter = "agy" if args.source == "gemini" else args.source
+    else:
+        source_filter = "all"
+
     from . import backup as backup_mod
 
     backup_dir = args.backup_dir or backup_mod.DEFAULT_BACKUP_DIR
 
     if args.backup:
-        stats = backup_mod.run_backup(Path.cwd(), args.depth, backup_dir)
+        stats = backup_mod.run_backup(
+            Path.cwd(), args.depth, backup_dir, source_filter=source_filter
+        )
         print(backup_mod.format_summary(stats, backup_dir))
         if stats.projects == 0:
             print(
-                "no matching project found under ~/.claude/projects "
-                "for this directory",
+                "no matching project found for this directory",
                 file=sys.stderr,
             )
         return
@@ -127,9 +162,9 @@ def main() -> None:
     from .tui import AplApp
 
     if args.view_backup:
-        AplApp(root_override=backup_dir).run()
+        AplApp(root_override=backup_dir, source_filter=source_filter).run()
     else:
-        AplApp(aggregate=args.all).run()
+        AplApp(aggregate=args.all, source_filter=source_filter).run()
 
 
 if __name__ == "__main__":

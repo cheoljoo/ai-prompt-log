@@ -1,18 +1,15 @@
-"""Durable backup layer: copies session jsonl files out of
-~/.claude/projects into a location independent of any one project's
-lifetime, so deleting a project directory doesn't lose its prompt history.
+"""Durable backup layer: copies session jsonl files out of live agent locations
+(~/.claude/projects, ~/.gemini/antigravity-cli, ~/.gemini/tmp) into a location
+independent of any one project's lifetime, so deleting a project directory
+doesn't lose its prompt history.
 
-Mirrors the same <encoded-cwd>/*.jsonl layout as source.CLAUDE_PROJECTS_DIR
-so model.py's existing loading code works against the backup unchanged --
-just point project_dir/aggregate_root at the backup dir instead.
-
-Incremental-copy logic (mtime + size) is carried over from the now-deleted
-poc/apl/sync.py (see `git show c7200c4:poc/apl/sync.py`). The one
-deliberate difference from that ephemeral cache: this backup never deletes
-anything -- it is an append-only archive.
+Mirrors the <encoded-cwd>/*.jsonl layout so model.py's loading code works
+against the backup unchanged -- just point project_dir/aggregate_root at the
+backup dir instead.
 """
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,68 +46,120 @@ def _is_root_or_descendant(cwd_field: str, root: Path) -> bool:
 
 
 def find_projects_by_cwd_ancestry(
-    root: Path, aggregate_root: Path = source.CLAUDE_PROJECTS_DIR
-) -> list[Path]:
-    """Every project dir under aggregate_root whose real (jsonl) cwd field
-    is `root` itself or a descendant of it.
-
-    Deliberately does not decode the encoded directory name (lossy, see
-    docs/data-model.md) -- it reads each project's own recorded `cwd`.
-    """
+    root: Path, source_filter: str = "all"
+) -> list[model.Project]:
+    """Every project whose real cwd is `root` itself or a descendant of it."""
     matches = []
-    for proj_dir in source.list_project_dirs(aggregate_root):
-        cwd_field = model._find_cwd_field(proj_dir)
-        if cwd_field and _is_root_or_descendant(cwd_field, root):
-            matches.append(proj_dir)
+    for proj in model.load_projects(source_filter=source_filter):
+        if proj.cwd and _is_root_or_descendant(proj.cwd, root):
+            matches.append(proj)
     return matches
 
 
-def select_projects(cwd: Path, depth: int | None) -> list[Path]:
-    """Which ~/.claude/projects subdirectories `apl --backup` should copy.
-
-    depth is None (no --depth given) -> just the current project, same
-    nearest-ancestor resolution as direct-mode viewing.
-    depth is an int -> every project whose real cwd is at or below the
-    directory `depth` levels above cwd.
-    """
+def select_projects(
+    cwd: Path, depth: int | None, source_filter: str = "all"
+) -> list[model.Project]:
+    """Which projects `apl --backup` should copy."""
     if depth is None:
-        d = source.find_direct_project_dir(cwd)
-        return [d] if d.is_dir() else []
+        p = model.load_project(cwd, source_filter=source_filter)
+        return [p] if p.session_files else []
     root = resolve_depth_root(cwd, depth)
-    return find_projects_by_cwd_ancestry(root)
+    return find_projects_by_cwd_ancestry(root, source_filter=source_filter)
 
 
-def copy_project(src_dir: Path, dest_root: Path) -> tuple[int, int, int]:
-    """Incrementally copy one project's *.jsonl into dest_root/<same-name>/.
+def copy_project(proj: model.Project, dest_root: Path) -> tuple[int, int, int]:
+    """Incrementally copy one project's session files into dest_root/<encoded-cwd>/.
 
-    Returns (copied, updated, unchanged). Never deletes anything from the
-    destination, even if it no longer matches the source directory.
+    Returns (copied, updated, unchanged). Never deletes anything from the destination.
     """
-    dest_dir = dest_root / src_dir.name
+    dest_dir = dest_root / source.encode_path(Path(proj.cwd))
     copied = updated = unchanged = 0
-    for f in source.list_session_files(src_dir):
-        dest_f = dest_dir / f.name
-        src_stat = f.stat()
-        if dest_f.exists():
-            dest_stat = dest_f.stat()
-            if dest_stat.st_mtime >= src_stat.st_mtime and dest_stat.st_size == src_stat.st_size:
+
+    for f in proj.session_files:
+        fmt = model.detect_file_format(f)
+
+        if fmt == "agy":
+            conv_id = (
+                proj.conv_metadata.get(f.stem, {}).get("id")
+                or (
+                    f.parent.parent.parent.name
+                    if f.parent.name == "logs"
+                    else f.stem
+                )
+            )
+            if conv_id.startswith("agy-"):
+                conv_id = conv_id[4:]
+            dest_f = dest_dir / f"agy-{conv_id}.jsonl"
+            existed = dest_f.exists()
+            if existed and dest_f.stat().st_mtime >= f.stat().st_mtime:
                 unchanged += 1
                 continue
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            meta = {
+                "type": "agy_metadata",
+                "cwd": proj.cwd,
+                "sessionId": conv_id,
+                "gitBranch": proj.conv_metadata.get(conv_id, {}).get("branch", ""),
+            }
+            with dest_f.open("w", errors="ignore") as out_fh:
+                out_fh.write(json.dumps(meta) + "\n")
+                with f.open("r", errors="ignore") as in_fh:
+                    shutil.copyfileobj(in_fh, out_fh)
+            if existed:
+                updated += 1
+            else:
+                copied += 1
+        elif fmt in ("gemini_json", "gemini_jsonl"):
+            dest_f = dest_dir / f"gemini-{f.stem}.jsonl"
+            existed = dest_f.exists()
+            if existed and dest_f.stat().st_mtime >= f.stat().st_mtime:
+                unchanged += 1
+                continue
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            meta = {
+                "type": "gemini_metadata",
+                "cwd": proj.cwd,
+                "sessionId": f.stem,
+            }
+            with dest_f.open("w", errors="ignore") as out_fh:
+                out_fh.write(json.dumps(meta) + "\n")
+                with f.open("r", errors="ignore") as in_fh:
+                    shutil.copyfileobj(in_fh, out_fh)
+            if existed:
+                updated += 1
+            else:
+                copied += 1
+        else:
+            # Standard Claude session file
+            dest_f = dest_dir / f.name
+            src_stat = f.stat()
+            existed = dest_f.exists()
+            if existed:
+                dest_stat = dest_f.stat()
+                if (
+                    dest_stat.st_mtime >= src_stat.st_mtime
+                    and dest_stat.st_size == src_stat.st_size
+                ):
+                    unchanged += 1
+                    continue
+                shutil.copy2(f, dest_f)
+                updated += 1
+                continue
+            dest_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dest_f)
-            updated += 1
-            continue
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, dest_f)
-        copied += 1
+            copied += 1
+
     return copied, updated, unchanged
 
 
-def run_backup(cwd: Path, depth: int | None, backup_dir: Path) -> BackupStats:
+def run_backup(
+    cwd: Path, depth: int | None, backup_dir: Path, source_filter: str = "all"
+) -> BackupStats:
     backup_dir.mkdir(parents=True, exist_ok=True)
-    project_dirs = select_projects(cwd, depth)
-    stats = BackupStats(projects=len(project_dirs))
-    for proj_dir in project_dirs:
-        copied, updated, unchanged = copy_project(proj_dir, backup_dir)
+    projects = select_projects(cwd, depth, source_filter=source_filter)
+    stats = BackupStats(projects=len(projects))
+    for proj in projects:
+        copied, updated, unchanged = copy_project(proj, backup_dir)
         stats.copied += copied
         stats.updated += updated
         stats.unchanged += unchanged
@@ -123,3 +172,4 @@ def format_summary(stats: BackupStats, backup_dir: Path) -> str:
         f"{stats.copied} copied, {stats.updated} updated, "
         f"{stats.unchanged} unchanged -> {backup_dir}"
     )
+

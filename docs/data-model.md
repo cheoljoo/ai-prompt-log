@@ -66,3 +66,31 @@ Prompt로 잡힌다** — `<task-notification>...<summary>...</summary>...</task
 - 집계 모드에서 "한 프로젝트" = 캐시 디렉터리 아래 한 하위 디렉터리(= 원래 `~/.claude/projects/<encoded-cwd>/`와 동일 구조)
 - 표시 이름은 그 프로젝트의 아무 레코드에서나 읽은 `cwd` 필드의 마지막 path segment 사용
 - `apl --backup`이 만드는 백업 디렉터리(기본 `~/ai-prompt-log.backup/`)도 이와 **완전히 동일한 레이아웃**(`<backup-dir>/<encoded-cwd>/*.jsonl`)을 그대로 미러링한다 — 그래서 위 파싱 규칙(§1~§6)이 백업 디렉터리에 대해서도 변경 없이 그대로 적용되고, `apl --view-backup`은 `~/.claude/projects` 대신 이 디렉터리를 가리키기만 하면 된다(`agents/F-backup.md`).
+
+## 8. Antigravity CLI (agy) 및 Gemini CLI 규격
+
+Antigravity CLI (agy) 및 Gemini CLI 로그도 Claude Code와 동일한 인터페이스로 탐색/백업할 수 있도록 지원한다:
+
+### 8-1. 파일 위치 및 메타데이터
+- **Antigravity CLI (agy)**:
+  - 트랜스크립트: `~/.gemini/antigravity-cli/brain/<conv_id>/.system_generated/logs/transcript.jsonl`
+  - 작업 디렉터리(cwd) 및 git 브랜치:
+    - `~/.gemini/antigravity-cli/conversations/<conv_id>.db`의 `trajectory_metadata_blob` (Protobuf 파싱: 태그 7 `file://...` URI 및 태그 1 하위 브랜치명)
+    - `~/.gemini/antigravity-cli/conversation_summaries.db`의 `workspace_uris` 컬럼 (`file://...`)
+- **Gemini CLI (tmp)**:
+  - 세션: `~/.gemini/tmp/<hash>/chats/session-*.json`
+
+### 8-2. AGY Prompt 경계 및 블록 판정
+- `type == "USER_INPUT"`: 사용자 프롬프트 시작
+  - `content` 내부의 `<USER_REQUEST>...</USER_REQUEST>` 태그 및 메타데이터 자동 언래핑
+  - `source == "USER_EXPLICIT"` 여부와 무관하게 사용자 입력 인식
+- `type == "PLANNER_RESPONSE"`: 어시스턴트 턴
+  - `tool_calls` 배열: `name`과 `args`를 읽어 `tool_use` 블록으로 변환
+  - `content`: 어시스턴트 답변 `text` 블록으로 변환
+
+### 8-3. 백업 포맷 (독립적 self-contained 저장)
+- AGY 세션 백업 시 `agy-<conv_id>.jsonl` 파일명의 첫 줄에 메타데이터 레코드 삽입:
+  ```json
+  {"type": "agy_metadata", "cwd": "/path/to/project", "sessionId": "<conv_id>", "gitBranch": "<branch>"}
+  ```
+- 이로써 SQLite DB에 의존하지 않고도 백업 디렉터리(`apl --view-backup`)에서 프로젝트 경로 및 브랜치를 완벽하게 복원할 수 있다.
