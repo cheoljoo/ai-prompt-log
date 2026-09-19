@@ -20,6 +20,12 @@ import (
 
 var commandRE = regexp.MustCompile(`(?s)<command-name>\s*(.*?)\s*</command-name>`)
 
+// taskNotificationRE matches the <task-notification> wrapper that background/
+// async completion notices (forked subagents incl. /btw, background Bash
+// commands, Monitor watches, scheduled wakeups, ...) are delivered in -- its
+// <summary> is a human-readable one-liner of what actually happened.
+var taskNotificationRE = regexp.MustCompile(`(?s)<task-notification>.*?<summary>\s*(.*?)\s*</summary>`)
+
 // KV is one ordered key/value pair from a JSON object's top level (Go maps
 // don't preserve key order, but tool_use arguments should render in the
 // order Claude Code emitted them).
@@ -202,9 +208,21 @@ func (p *Prompt) IsCommand() bool {
 	return commandRE.MatchString(p.UserText)
 }
 
+func (p *Prompt) IsTaskNotification() bool {
+	return taskNotificationRE.MatchString(p.UserText)
+}
+
 func (p *Prompt) Summary() string {
 	if m := commandRE.FindStringSubmatch(p.UserText); m != nil {
 		return "[cmd] " + m[1]
+	}
+	if m := taskNotificationRE.FindStringSubmatch(p.UserText); m != nil {
+		text := m[1]
+		runes := []rune(text)
+		if len(runes) > 100 {
+			text = string(runes[:97]) + "..."
+		}
+		return "[bg] " + text
 	}
 	firstLine := ""
 	if p.UserText != "" {

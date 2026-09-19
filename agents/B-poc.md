@@ -98,6 +98,21 @@
 - `set_interval(30, self._check_for_changes)`로 30초마다 같은 비교를 백그라운드에서 수행 — 변화가 있으면 `border_subtitle`에 "⚠ changes available — Ctrl+L to reload"를 표시하고 `notify()` 토스트도 띄우지만, **자동으로는 reload하지 않는다**(사용자가 보고 있는 커서 위치가 갑자기 바뀌는 걸 피하기 위해 reload 시점은 항상 `Ctrl+L`로 사용자가 직접 결정).
 - 실제 session 파일을 격리된 임시 디렉터리로 복사해(운영 중인 `~/.claude/projects` 데이터는 건드리지 않음) 헤드리스로 검증: no-op reload(변경 없음), 변경 감지 후 표시, 실제 reload 전부 통과. `regression_v2.py` 전체 재통과(16개 프로젝트, 611개 prompt, 0 fail).
 
+## 백그라운드/비동기 알림에 `[bg]` 태그 (Ctrl+L reload 등과 마찬가지로 Python/Go 동시 구현)
+
+`/btw`(fork), 백그라운드 Bash 명령, Monitor 감시, 예약된 wakeup 등은 완료되면
+`type:"user"` + 문자열 content로 세션에 다시 주입되고(`<task-notification>...<summary>...</summary>...</task-notification>`
+로 감싸짐), 이미 기존 "prompt 경계" 규칙(`type=="user"` + 문자열 content)을 만족하므로 apl이 **이미
+하나의 prompt로 잡고 있었다** — 다만 요약이 그냥 `<task-notification>` 여는 태그 그대로 나와 알아볼
+수 없는 문제가 있었다. `Prompt.is_task_notification`/`TASK_NOTIFICATION_RE`를 추가해 `<summary>` 태그
+안의 사람이 읽을 수 있는 한 줄을 요약으로 뽑고 `[bg]` 태그를 붙이도록 수정(`[cmd]`와 같은 우선순위 —
+`is_command` 체크 다음).
+
+실제 이 프로젝트 자신의 세션 로그(`~/.claude/projects/-data01-cheoljoo-lee-code-ai-prompt-log/*.jsonl`)에
+이미 실존하는 사례로 검증: 백그라운드 Bash 명령 완료, 세션 전환 중 끊긴 백그라운드 명령 알림, `/btw`로
+fork된 서브에이전트의 답변 3건 전부 `[bg] <summary 텍스트>` 형태로 올바르게 태그됨을 확인. 전체
+`~/.claude/projects`(16개 프로젝트, 502개 prompt)를 스캔해도 에러 없이 45건이 `[bg]`로 잡힘.
+
 ## 알려진 POC 한계 (Agent C/D에서 다룰 것)
 - `/` 검색, 날짜/브랜치/source 필터, 통계 화면, export, `--since`/`--tail`, 세션 재개(`--resume`) 표시 — plan.md §7에서 반영하기로 한 기능들은 아직 미구현(POC는 최소 골격만)
 - `thinking` 블록은 항상 숨김(토글 없음)

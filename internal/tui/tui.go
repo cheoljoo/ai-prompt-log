@@ -247,6 +247,8 @@ func (m *Model) setPromptsFrom(proj model.Project) {
 		tag := ""
 		if p.IsCommand() {
 			tag = "[cmd]"
+		} else if p.IsTaskNotification() {
+			tag = "[bg]"
 		} else if p.Sidechain {
 			tag = "[subagent]"
 		}

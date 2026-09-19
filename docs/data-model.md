@@ -35,6 +35,12 @@ Claude Code는 세션 로그를 다음 위치에 저장한다:
 
 `<command-name>/clear</command-name>`, `<command-name>/compact</command-name>`, 자동 compact 요약("This session is being continued...")도 위 규칙을 만족하는 문자열 content이므로 **그대로 하나의 Prompt로 잡힌다** — 오히려 이 편이 사용자가 원한 "clear/compact 전후 흐름이 다 보이는" 요구에 맞아 의도적으로 유지한다. 표시할 때 이런 항목은 `[cmd]` 태그를 붙여 구분한다.
 
+같은 이유로, fork된 서브에이전트(`/btw` 포함), 백그라운드 Bash 명령, Monitor 감시, 예약된 wakeup 등
+**비동기 작업이 완료됐다는 알림도 `type:"user"` + 문자열 content로 세션에 다시 주입되므로 하나의
+Prompt로 잡힌다** — `<task-notification>...<summary>...</summary>...</task-notification>`로 감싸여
+있다. 이런 항목은 `<summary>` 태그 안의 사람이 읽을 수 있는 한 줄 설명을 요약으로 뽑아 `[bg]` 태그를
+붙인다(그냥 두면 요약이 `<task-notification>` 여는 태그 그대로 나와 알아볼 수 없기 때문).
+
 ## 3-1. Token 사용량
 
 `assistant` 레코드의 `message.usage`에 `input_tokens`/`cache_creation_input_tokens`/`cache_read_input_tokens`/`output_tokens`가 들어있다(실측 확인). 한 Prompt의 `total_tokens`는 그 Prompt에 속한 모든 `assistant` 레코드의 이 네 값을 합산한 것 — 캐시 생성/읽기까지 포함해야 실제 API 호출 비용과 맞아떨어진다(순수 `output_tokens`만 쓰면 긴 대화에서 지배적인 cache_creation 비용이 누락됨).

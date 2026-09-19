@@ -343,3 +343,33 @@ func TestReloadRealData(t *testing.T) {
 	}
 	t.Logf("reload: %d -> %d prompts after picking up the change", promptsBefore, len(m.currentPrompts))
 }
+
+// TestTaskNotificationTagRealData confirms background/async completion
+// notices (forked subagents incl. /btw, background Bash commands, Monitor
+// watches, ...) are recognized and tagged, not just left showing the raw
+// "<task-notification>" opening tag as their summary. This repo's own
+// session log already contains real examples of this.
+func TestTaskNotificationTagRealData(t *testing.T) {
+	mode, dir := source.DetectMode("/data01/cheoljoo.lee/code/ai-prompt-log", false)
+	m := New(mode, dir)
+	m = update(m, tea.WindowSizeMsg{Width: 160, Height: 40})
+
+	var found []model.Prompt
+	for _, p := range m.currentPrompts {
+		if p.IsTaskNotification() {
+			found = append(found, p)
+		}
+	}
+	if len(found) == 0 {
+		t.Fatal("expected at least one real task-notification prompt in this project's own session log")
+	}
+	for _, p := range found {
+		if !strings.HasPrefix(p.Summary(), "[bg] ") {
+			t.Fatalf("expected task-notification summary to start with [bg], got %q", p.Summary())
+		}
+		if strings.Contains(p.Summary(), "<task-notification>") {
+			t.Fatalf("summary should not leak the raw wrapper tag: %q", p.Summary())
+		}
+	}
+	t.Logf("task-notification prompts: %d, e.g. %q", len(found), found[0].Summary())
+}

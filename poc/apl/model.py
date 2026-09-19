@@ -13,6 +13,11 @@ from typing import Iterator
 from . import source
 
 COMMAND_RE = re.compile(r"<command-name>\s*(.*?)\s*</command-name>", re.DOTALL)
+# Background/async completion notices (forked subagents incl. /btw, background
+# Bash commands, Monitor watches, scheduled wakeups, ...) are all delivered
+# back into the session as a normal user-turn wrapped in <task-notification>;
+# its <summary> is a human-readable one-liner of what actually happened.
+TASK_NOTIFICATION_RE = re.compile(r"<task-notification>.*?<summary>\s*(.*?)\s*</summary>", re.DOTALL)
 
 
 @dataclass
@@ -38,10 +43,20 @@ class Prompt:
         return bool(COMMAND_RE.search(self.user_text or ""))
 
     @property
+    def is_task_notification(self) -> bool:
+        return bool(TASK_NOTIFICATION_RE.search(self.user_text or ""))
+
+    @property
     def summary(self) -> str:
         m = COMMAND_RE.search(self.user_text or "")
         if m:
             return f"[cmd] {m.group(1)}"
+        m = TASK_NOTIFICATION_RE.search(self.user_text or "")
+        if m:
+            text = m.group(1).strip()
+            if len(text) > 100:
+                text = text[:97] + "..."
+            return f"[bg] {text}"
         first_line = (self.user_text or "").strip().splitlines()[0] if self.user_text else ""
         first_line = first_line.strip()
         if len(first_line) > 100:
