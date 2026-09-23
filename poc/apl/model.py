@@ -1,12 +1,13 @@
 """Parse & model layer: JSONL records -> Project / Prompt.
 
 Boundary and ordering rules follow docs/data-model.md.
-Supports Claude Code, Antigravity CLI (agy), and legacy Gemini CLI.
+Supports Claude Code, Antigravity CLI (agy), legacy Gemini CLI, and OpenCode.
 """
 from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -38,7 +39,7 @@ class Prompt:
     user_text: str
     blocks: list = field(default_factory=list)  # list[AssistantBlock]
     total_tokens: int = 0
-    source: str = "claude"  # "claude" | "agy" | "gemini"
+    source: str = "claude"  # "claude" | "agy" | "gemini" | "opencode"
 
     @property
     def is_command(self) -> bool:
@@ -83,6 +84,140 @@ class Prompt:
             first_line = first_line[:97] + "..."
         return first_line or "(empty)"
 
+    @property
+    def file_changes(self) -> list[tuple[str, str]]:
+        """Best-effort (path, action) list of files created/modified/deleted
+        by this prompt's tool calls. action is one of
+        "created" | "modified" | "deleted". See extract_file_changes()."""
+        return extract_file_changes(self)
+
+
+# tool_name -> (input key holding the file path, action)
+_FILE_TOOL_OPS: dict[str, tuple[str, str]] = {
+    "Write": ("file_path", "created"),
+    "Edit": ("file_path", "modified"),
+    "MultiEdit": ("file_path", "modified"),
+    "NotebookEdit": ("notebook_path", "modified"),
+    "write_to_file": ("TargetFile", "created"),
+    "replace_file_content": ("TargetFile", "modified"),
+    "write_file": ("file_path", "created"),
+}
+
+# tool_name -> input key holding the raw shell command string
+_SHELL_TOOL_COMMAND_KEYS: dict[str, str] = {
+    "Bash": "command",
+    "run_command": "CommandLine",
+    "run_shell_command": "command",
+    "bash": "command",
+}
+
+
+def _bash_file_ops(command: str) -> list[tuple[str, str]]:
+    """Best-effort scan of a shell command string for rm/mv/cp/touch/mkdir
+    invocations, returning (path, action) pairs. Deliberately conservative:
+    only handles simple statement-per-segment commands, not full shell
+    parsing (pipes into xargs, variables, globs, etc. are not resolved)."""
+    ops: list[tuple[str, str]] = []
+    if not command:
+        return ops
+    for stmt in re.split(r"&&|\|\||;|\n", command):
+        stmt = stmt.strip()
+        if not stmt:
+            continue
+        m = re.match(r"^(rm|rmdir)\b(.*)$", stmt)
+        if m:
+            try:
+                args = shlex.split(m.group(2))
+            except ValueError:
+                args = m.group(2).split()
+            for a in args:
+                if not a.startswith("-"):
+                    ops.append((a, "deleted"))
+            continue
+        m = re.match(r"^touch\b(.*)$", stmt)
+        if m:
+            try:
+                args = shlex.split(m.group(1))
+            except ValueError:
+                args = m.group(1).split()
+            for a in args:
+                if not a.startswith("-"):
+                    ops.append((a, "created"))
+            continue
+        m = re.match(r"^mkdir\b(.*)$", stmt)
+        if m:
+            try:
+                args = shlex.split(m.group(1))
+            except ValueError:
+                args = m.group(1).split()
+            for a in args:
+                if not a.startswith("-"):
+                    ops.append((a, "created"))
+            continue
+        m = re.match(r"^mv\b(.*)$", stmt)
+        if m:
+            try:
+                args = [a for a in shlex.split(m.group(1)) if not a.startswith("-")]
+            except ValueError:
+                args = [a for a in m.group(1).split() if not a.startswith("-")]
+            if len(args) >= 2:
+                ops.append((args[0], "deleted"))
+                ops.append((args[-1], "created"))
+            continue
+        m = re.match(r"^cp\b(.*)$", stmt)
+        if m:
+            try:
+                args = [a for a in shlex.split(m.group(1)) if not a.startswith("-")]
+            except ValueError:
+                args = [a for a in m.group(1).split() if not a.startswith("-")]
+            if len(args) >= 2:
+                ops.append((args[-1], "created"))
+            continue
+    return ops
+
+
+def extract_file_changes(prompt: "Prompt") -> list[tuple[str, str]]:
+    """Best-effort list of (path, action) file changes derived from a
+    prompt's tool calls, across all supported sources (Claude/AGY/Gemini/
+    OpenCode). action is "created" | "modified" | "deleted".
+
+    Structured file tools (Write/Edit, write_to_file/replace_file_content,
+    write_file, opencode's edit) are reliable. Shell/bash-style tools are
+    only regex-scanned for rm/mv/cp/touch/mkdir, so are best-effort and may
+    miss or misinterpret complex commands.
+    """
+    raw: list[tuple[str, str]] = []
+    for block in prompt.blocks:
+        if block.kind != "tool_use":
+            continue
+        name = block.tool_name
+        inp = block.tool_input or {}
+
+        if name in _FILE_TOOL_OPS:
+            key, action = _FILE_TOOL_OPS[name]
+            path = inp.get(key)
+            if path:
+                raw.append((path, action))
+        elif name == "edit":  # OpenCode's edit tool
+            path = inp.get("filePath")
+            if path:
+                action = "modified" if inp.get("oldString") else "created"
+                raw.append((path, action))
+        elif name in _SHELL_TOOL_COMMAND_KEYS:
+            command = inp.get(_SHELL_TOOL_COMMAND_KEYS[name], "")
+            raw.extend(_bash_file_ops(command))
+
+    # Merge multiple ops on the same path within one prompt into its net
+    # effect: a later "modified" doesn't downgrade an earlier "created", but
+    # a later "created"/"deleted" replaces whatever came before.
+    merged: dict[str, str] = {}
+    for path, action in raw:
+        prev = merged.get(path)
+        if prev == "created" and action == "modified":
+            continue
+        merged[path] = action
+    return list(merged.items())
+
 
 @dataclass
 class Project:
@@ -91,7 +226,7 @@ class Project:
     cwd: str = ""
     last_activity: str = ""
     prompt_count: int = 0
-    source: str = "all"  # "claude" | "agy" | "gemini" | "all" | "both"
+    source: str = "all"  # "claude" | "agy" | "gemini" | "opencode" | "all" | "both"
     session_files: list[Path] = field(default_factory=list)
     conv_metadata: dict[str, dict] = field(default_factory=dict)
 
@@ -197,6 +332,21 @@ def parse_claude_session_file(path: Path) -> list[Prompt]:
         elif rec.get("type") == "assistant" and current is not None:
             current.blocks.extend(_extract_assistant_blocks(rec))
             current.total_tokens += _usage_tokens(rec)
+    return prompts
+
+
+def parse_opencode_session_file(path: Path) -> list[Prompt]:
+    """Return Prompts found in a materialized OpenCode session jsonl.
+
+    OpenCode itself stores sessions in a sqlite DB (see source.py); by the
+    time it reaches here, source.scan_opencode_conversations() has already
+    rendered the session into the same Claude-schema jsonl shape (a leading
+    "opencode_metadata" line, then "user"/"assistant" records), so we can
+    reuse the Claude parser verbatim and just relabel the source.
+    """
+    prompts = parse_claude_session_file(path)
+    for p in prompts:
+        p.source = "opencode"
     return prompts
 
 
@@ -371,7 +521,8 @@ def parse_gemini_jsonl_file(path: Path) -> list[Prompt]:
 
 
 def detect_file_format(path: Path) -> str:
-    """Detect format of a session log file: 'claude', 'agy', 'gemini_json', or 'gemini_jsonl'."""
+    """Detect format of a session log file: 'claude', 'agy', 'opencode',
+    'gemini_json', or 'gemini_jsonl'."""
     try:
         with path.open("r", errors="ignore") as fh:
             chunk = fh.read(4096)
@@ -395,6 +546,8 @@ def detect_file_format(path: Path) -> str:
                 rtype = rec.get("type")
                 if rtype == "agy_metadata":
                     return "agy"
+                if rtype == "opencode_metadata":
+                    return "opencode"
                 if rtype == "gemini_metadata":
                     return "gemini_jsonl"
                 if rtype in ("USER_INPUT", "PLANNER_RESPONSE", "LIST_DIRECTORY", "VIEW_FILE"):
@@ -423,6 +576,8 @@ def parse_session_file(
         return parse_agy_transcript_file(
             path, session_id=session_id, default_branch=default_branch
         )
+    if fmt == "opencode":
+        return parse_opencode_session_file(path)
     if fmt == "gemini_json":
         return parse_gemini_json_file(path)
     if fmt == "gemini_jsonl":
@@ -552,10 +707,18 @@ def load_project(target: Path, source_filter: str = "all") -> Project:
         all_files.append(gf)
         sources_found.add("gemini")
 
+    for c in info.get("opencode_convs", []):
+        t = c.get("transcript")
+        if t and t.exists():
+            all_files.append(t)
+            metadata[c["id"]] = c
+            metadata[t.stem] = c
+            sources_found.add("opencode")
+
     src_label = (
         "+".join(sorted(sources_found))
         if sources_found
-        else ("claude" if source_filter == "claude" else "agy")
+        else (source_filter if source_filter in ("claude", "opencode") else "agy")
     )
     last_activity = max((_session_start_timestamp(f) for f in all_files), default="")
     prompts = build_prompts_from_files(all_files, metadata)
@@ -593,9 +756,10 @@ def load_projects(
             for d in source.list_project_dirs(source.CLAUDE_PROJECTS_DIR)
         ]
 
-    # 3. Global multi-source aggregate (Claude + AGY + Gemini)
+    # 3. Global multi-source aggregate (Claude + AGY + Gemini + OpenCode)
     include_claude = source_filter in ("all", "claude")
     include_agy = source_filter in ("all", "agy", "gemini")
+    include_opencode = source_filter in ("all", "opencode")
 
     projects_by_ws: dict[str, dict] = {}
 
@@ -613,6 +777,7 @@ def load_projects(
                     "claude_files": [],
                     "agy_convs": [],
                     "gemini_files": [],
+                    "opencode_convs": [],
                     "conv_metadata": {},
                 },
             )
@@ -631,6 +796,7 @@ def load_projects(
                     "claude_files": [],
                     "agy_convs": [],
                     "gemini_files": [],
+                    "opencode_convs": [],
                     "conv_metadata": {},
                 },
             )
@@ -649,10 +815,31 @@ def load_projects(
                     "claude_files": [],
                     "agy_convs": [],
                     "gemini_files": [],
+                    "opencode_convs": [],
                     "conv_metadata": {},
                 },
             )
             entry["gemini_files"].extend(g.get("chat_files", []))
+
+    if include_opencode:
+        for c in source.scan_opencode_conversations():
+            ws = c.get("workspace", "")
+            if not ws:
+                ws = f"opencode-{c['id'][:8]}"
+            entry = projects_by_ws.setdefault(
+                ws,
+                {
+                    "cwd": ws,
+                    "display_name": Path(ws).name,
+                    "claude_files": [],
+                    "agy_convs": [],
+                    "gemini_files": [],
+                    "opencode_convs": [],
+                    "conv_metadata": {},
+                },
+            )
+            entry["opencode_convs"].append(c)
+            entry["conv_metadata"][c["id"]] = c
 
     project_list: list[Project] = []
     for ws, data in projects_by_ws.items():
@@ -670,6 +857,11 @@ def load_projects(
         for gf in data["gemini_files"]:
             all_files.append(gf)
             sources_found.add("gemini")
+        for c in data["opencode_convs"]:
+            t = c.get("transcript")
+            if t and t.exists():
+                all_files.append(t)
+                sources_found.add("opencode")
 
         if not all_files:
             continue
