@@ -54,23 +54,24 @@ func main() {
 	viewBackup := flag.Bool("view-backup", false, "Browse a previous --backup (3-pane aggregate view, rooted at --backup-dir)")
 	depth := flag.Int("depth", 0, "With --backup: walk up N directories from cwd and back up every project whose real cwd is that directory or a descendant of it. Omit to back up only the current project.")
 	backupDir := flag.String("backup-dir", "", "Backup directory for --backup / --view-backup (default: ~/ai-prompt-log.backup/)")
-	sourceFlag := flag.String("source", "all", "AI assistant log source to display (all, claude, agy, gemini)")
+	sourceFlag := flag.String("source", "all", "AI assistant log source to display (all, claude, agy, gemini, opencode)")
 	flag.StringVar(sourceFlag, "s", "all", "shorthand for --source")
 	onlyAgy := flag.Bool("agy", false, "Display only Antigravity CLI (agy) logs")
 	onlyClaude := flag.Bool("claude", false, "Display only Claude Code logs")
 	onlyGemini := flag.Bool("gemini", false, "Display only Antigravity / Gemini CLI logs (alias for --agy)")
+	onlyOpencode := flag.Bool("opencode", false, "Display only OpenCode logs")
 	showVersion := flag.Bool("version", false, "Print the apl version and exit")
 	flag.BoolVar(showVersion, "v", false, "shorthand for --version")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "apl (AI Prompt Log viewer) - a tig-style TUI for browsing Claude Code and Antigravity CLI (agy / gemini) session logs,\n")
-		fmt.Fprintf(os.Stderr, "read directly from ~/.claude/projects and ~/.gemini/antigravity-cli (no copying).\n\n")
+		fmt.Fprintf(os.Stderr, "apl (AI Prompt Log viewer) - a tig-style TUI for browsing Claude Code, Antigravity CLI (agy / gemini),\n")
+		fmt.Fprintf(os.Stderr, "and OpenCode session logs, read directly from ~/.claude/projects, ~/.gemini/antigravity-cli, and ~/.local/share/opencode (no copying).\n\n")
 		fmt.Fprintf(os.Stderr, "Plain `apl` shows just the current project's own prompts (2 panes: Prompts | Detail).\n")
 		fmt.Fprintf(os.Stderr, "`apl --all` shows every project at once (3 panes: Projects | Prompts | Detail).\n\n")
 		fmt.Fprintf(os.Stderr, "`apl --backup` copies session logs into a durable backup directory (outside\n")
 		fmt.Fprintf(os.Stderr, "live directories, so it survives a project directory being deleted).\n")
 		fmt.Fprintf(os.Stderr, "`apl --view-backup` browses that backup with the same 3-pane view.\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: apl [-a|--all | --backup | --view-backup] [--depth N] [--backup-dir PATH] [-s|--source {all,claude,agy,gemini} | --agy | --claude | --gemini]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: apl [-a|--all | --backup | --view-backup] [--depth N] [--backup-dir PATH] [-s|--source {all,claude,agy,gemini,opencode} | --agy | --claude | --gemini | --opencode]\n\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n%s\napl %s\nSource: %s\n", keybindingsHelp, resolvedVersion(), gitURL)
 	}
@@ -93,11 +94,13 @@ func main() {
 		sourceFilter = "agy"
 	} else if *onlyClaude {
 		sourceFilter = "claude"
+	} else if *onlyOpencode {
+		sourceFilter = "opencode"
 	}
 	switch sourceFilter {
-	case "all", "claude", "agy", "gemini":
+	case "all", "claude", "agy", "gemini", "opencode":
 	default:
-		fail("invalid source %q: choose from all, claude, agy, gemini", sourceFilter)
+		fail("invalid source %q: choose from all, claude, agy, gemini, opencode", sourceFilter)
 	}
 
 	modeCount := 0

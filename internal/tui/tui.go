@@ -37,11 +37,13 @@ const maxToolValueLen = 160
 var (
 	styleUserBadge      = lipgloss.NewStyle().Reverse(true).Bold(true).Foreground(lipgloss.Color("6"))
 	styleFinalBadge     = lipgloss.NewStyle().Reverse(true).Bold(true).Foreground(lipgloss.Color("4"))
+	styleModifiedBadge  = lipgloss.NewStyle().Reverse(true).Bold(true).Foreground(lipgloss.Color("5"))
 	styleAssistantBadge = lipgloss.NewStyle().Reverse(true).Bold(true).Foreground(lipgloss.Color("2"))
 	styleDim            = lipgloss.NewStyle().Faint(true)
 	styleMagenta        = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
 	styleBlue           = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 	styleYellow         = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	styleRed            = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 	styleCyan           = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
 	styleGreen          = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
 	styleBold           = lipgloss.NewStyle().Bold(true)
@@ -103,9 +105,12 @@ func formatPromptDetail(p model.Prompt) string {
 	var b strings.Builder
 
 	srcBadge := styleCyan.Render("[claude]")
-	if p.Source == "agy" {
+	switch p.Source {
+	case "agy":
 		srcBadge = styleGreen.Render("[agy]")
-	} else if p.Source == "gemini" {
+	case "opencode":
+		srcBadge = styleMagenta.Render("[opencode]")
+	case "gemini":
 		srcBadge = styleBlue.Render("[gemini]")
 	}
 	meta := []string{srcBadge, styleDim.Render(p.Timestamp)}
@@ -131,6 +136,25 @@ func formatPromptDetail(p model.Prompt) string {
 		b.WriteString("\n\n")
 		b.WriteString(final)
 		b.WriteString("\n\n")
+	}
+
+	fileChanges := p.FileChanges()
+	if len(fileChanges) > 0 {
+		b.WriteString(styleModifiedBadge.Render(" MODIFIED FILES "))
+		b.WriteString("\n\n")
+		for _, fc := range fileChanges {
+			sym := styleDim.Render("?")
+			switch fc.Action {
+			case "created":
+				sym = styleGreen.Render("+")
+			case "modified":
+				sym = styleYellow.Render("~")
+			case "deleted":
+				sym = styleRed.Render("-")
+			}
+			b.WriteString(fmt.Sprintf("  %s %s\n", sym, fc.Path))
+		}
+		b.WriteString("\n")
 	}
 
 	if len(p.Blocks) > 0 {
@@ -212,7 +236,7 @@ func NewWithFilter(mode, rootDir, sourceFilter string) Model {
 
 	promptCols := []table.Column{
 		{Title: "Date", Width: 19},
-		{Title: "Source", Width: 7},
+		{Title: "Source", Width: 8},
 		{Title: "Branch", Width: 10},
 		{Title: "Tokens", Width: 7},
 		{Title: "Tag", Width: 10},
@@ -223,7 +247,7 @@ func NewWithFilter(mode, rootDir, sourceFilter string) Model {
 	if mode == "aggregate" {
 		projCols := []table.Column{
 			{Title: "Project", Width: 20},
-			{Title: "Source", Width: 10},
+			{Title: "Source", Width: 12},
 			{Title: "Prompts", Width: 7},
 			{Title: "Last activity", Width: 19},
 		}

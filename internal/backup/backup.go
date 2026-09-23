@@ -188,6 +188,33 @@ func CopyProject(proj model.Project, destRoot string) (copied, updated, unchange
 			} else {
 				copied++
 			}
+		} else if fmtType == "opencode" {
+			convID := stem
+			if meta, ok := proj.ConvMetadata[stem]; ok && meta["id"] != "" {
+				convID = meta["id"]
+			}
+			destF := filepath.Join(destDir, fmt.Sprintf("opencode-%s.jsonl", convID))
+			srcInfo, err := os.Stat(f)
+			if err != nil {
+				continue
+			}
+			destInfo, destErr := os.Stat(destF)
+			existed := destErr == nil
+			if existed && !destInfo.ModTime().Before(srcInfo.ModTime()) {
+				unchanged++
+				continue
+			}
+			if err := os.MkdirAll(destDir, 0o755); err != nil {
+				continue
+			}
+			if err := copyFile(f, destF); err == nil {
+				_ = os.Chtimes(destF, srcInfo.ModTime(), srcInfo.ModTime())
+				if existed {
+					updated++
+				} else {
+					copied++
+				}
+			}
 		} else if fmtType == "gemini_json" || fmtType == "gemini_jsonl" {
 			destF := filepath.Join(destDir, fmt.Sprintf("gemini-%s.jsonl", stem))
 			srcInfo, err := os.Stat(f)
