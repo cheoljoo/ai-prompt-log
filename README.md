@@ -1,12 +1,13 @@
-# apl — AI Prompt Log viewer for Claude Code & Antigravity CLI (agy)
+# apl — AI Prompt Log viewer for Claude Code, Antigravity CLI (agy) & OpenCode
 
-A `tig`-style terminal viewer for [**Claude Code**](https://claude.com/claude-code) and [**Antigravity CLI**](https://github.com/google-deepmind) (`agy` / Gemini) session logs. `apl` reads the local session files directly (`~/.claude/projects/` and `~/.gemini/antigravity-cli/`) — no separate logging, no database, no API keys, nothing to configure.
+A `tig`-style terminal viewer for [**Claude Code**](https://claude.com/claude-code), [**Antigravity CLI**](https://github.com/google-deepmind) (`agy` / Gemini), and [**OpenCode**](https://opencode.ai) session logs. `apl` reads local session logs directly (`~/.claude/projects/`, `~/.gemini/antigravity-cli/`, and `~/.local/share/opencode/`) — no separate logging daemon, no manual database setup, no API keys, nothing to configure.
 
-> **Compatibility**: built for Claude Code's local session-log format (`~/.claude/projects/**/*.jsonl`) and Antigravity CLI (`~/.gemini/antigravity-cli/brain/**/transcript.jsonl` + `~/.gemini/tmp/`), verified against real logs (see [`docs/data-model.md`](docs/data-model.md)). This is an independent, unofficial tool.
+> **Compatibility**: built for Claude Code's local session logs (`~/.claude/projects/**/*.jsonl`), Antigravity CLI (`~/.gemini/antigravity-cli/brain/**/transcript.jsonl` + `~/.gemini/tmp/`), and OpenCode (`~/.local/share/opencode/opencode.db`), verified against real logs (see [`docs/data-model.md`](docs/data-model.md)). This is an independent, unofficial tool.
 
 ```
 apl               # this project's own prompts only   -> 2 panes: Prompts | Detail
 apl --all         # every project you've used         -> 3 panes: Projects | Prompts | Detail
+apl --opencode    # view only OpenCode prompts
 apl --agy         # view only Antigravity CLI (agy) prompts
 apl --claude      # view only Claude Code prompts
 apl --backup      # copy session logs to a durable backup dir (survives deleting the project)
@@ -59,15 +60,16 @@ This puts `apl` on your `PATH` (via `uv`'s tool bin directory). Since it's an ed
 
 ```sh
 cd ~/code/some-project
-apl              # browse this project's prompts (both Claude Code & AGY)
+apl              # browse this project's prompts (Claude Code, AGY, OpenCode)
+apl --opencode   # browse only OpenCode prompts
 apl --agy        # browse only Antigravity CLI (agy) prompts
 apl --claude     # browse only Claude Code prompts
 
-apl --all        # browse every project across ~/.claude/projects and ~/.gemini (3 panes)
-apl --all --agy  # browse all projects with agy sessions only
+apl --all        # browse every project across sources (3 panes)
+apl --all --opencode # browse all projects with OpenCode sessions only
 apl --help       # usage, keybindings, this repo's URL
 
-apl --backup                  # back up current project (Claude + AGY)
+apl --backup                  # back up current project (Claude + AGY + OpenCode)
 apl --backup --depth 1        # + every sibling project under the parent directory
 apl --backup --backup-dir PATH  # use a custom backup location (default: ~/ai-prompt-log.backup/)
 apl --view-backup              # browse a previous --backup (3 panes, like --all)
@@ -107,7 +109,7 @@ Claude Code already logs every session as JSONL at `~/.claude/projects/<encoded-
 
 A "prompt" is one user turn plus the assistant text/tool-call blocks that follow it, up to the next user turn. This also means `/clear` and context-compaction boundaries stay visible — see [`docs/data-model.md`](docs/data-model.md) for the exact parsing rules, verified against real session logs.
 
-The Detail pane shows, in order: **USER** (the prompt), **FINAL-RESULT** (the assistant's concluding text, so you can see what happened at a glance), then **ASSISTANT** (the full trace — every tool call in order, ending with that same final text again). The repetition is deliberate: skim the top two sections first, and only scroll into the full trace when you need to know *how* it got there.
+The Detail pane shows, in order: **USER** (the prompt), **FINAL-RESULT** (the assistant's concluding text, so you can see what happened at a glance), **MODIFIED FILES** (files created, modified, or deleted across the prompt's tool calls), then **ASSISTANT** (the full trace — every tool call in order, ending with that same final text again). The repetition is deliberate: skim the top sections first, and only scroll into the full trace when you need to know *how* it got there.
 
 ## Project status
 

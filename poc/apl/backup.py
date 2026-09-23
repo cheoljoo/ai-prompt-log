@@ -1,7 +1,7 @@
 """Durable backup layer: copies session jsonl files out of live agent locations
-(~/.claude/projects, ~/.gemini/antigravity-cli, ~/.gemini/tmp) into a location
-independent of any one project's lifetime, so deleting a project directory
-doesn't lose its prompt history.
+(~/.claude/projects, ~/.gemini/antigravity-cli, ~/.gemini/tmp,
+~/.local/share/opencode) into a location independent of any one project's
+lifetime, so deleting a project directory doesn't lose its prompt history.
 
 Mirrors the <encoded-cwd>/*.jsonl layout so model.py's loading code works
 against the backup unchanged -- just point project_dir/aggregate_root at the
@@ -105,6 +105,21 @@ def copy_project(proj: model.Project, dest_root: Path) -> tuple[int, int, int]:
                 out_fh.write(json.dumps(meta) + "\n")
                 with f.open("r", errors="ignore") as in_fh:
                     shutil.copyfileobj(in_fh, out_fh)
+            if existed:
+                updated += 1
+            else:
+                copied += 1
+        elif fmt == "opencode":
+            conv_id = (
+                proj.conv_metadata.get(f.stem, {}).get("id") or f.stem
+            )
+            dest_f = dest_dir / f"opencode-{conv_id}.jsonl"
+            existed = dest_f.exists()
+            if existed and dest_f.stat().st_mtime >= f.stat().st_mtime:
+                unchanged += 1
+                continue
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dest_f)
             if existed:
                 updated += 1
             else:

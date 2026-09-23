@@ -42,6 +42,20 @@ def escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("[", "\\[")
 
 
+def _source_style(src: str) -> str:
+    """Color for a given prompt/project 'source' label (may be a
+    '+'-joined combo like 'agy+claude')."""
+    if "agy" in src:
+        return "green"
+    if "opencode" in src:
+        return "magenta"
+    if "gemini" in src:
+        return "blue"
+    if "claude" in src:
+        return "cyan"
+    return "dim"
+
+
 def _recency_style(ts: str) -> str:
     if not ts:
         return "dim"
@@ -94,7 +108,7 @@ def format_prompt_detail(prompt: model.Prompt) -> str:
     """
     meta = [f"[dim]{escape(prompt.timestamp)}[/dim]"]
     if prompt.source:
-        src_color = "green" if prompt.source == "agy" else ("blue" if prompt.source == "gemini" else "cyan")
+        src_color = _source_style(prompt.source)
         meta.append(f"[{src_color}]{escape(prompt.source)}[/{src_color}]")
     if prompt.branch:
         meta.append(f"[magenta]{escape(prompt.branch)}[/magenta]")
@@ -114,6 +128,20 @@ def format_prompt_detail(prompt: model.Prompt) -> str:
         lines.append("[reverse bold blue] FINAL-RESULT [/reverse bold blue]")
         lines.append("")
         lines.append(escape(final_result))
+        lines.append("")
+
+    file_changes = prompt.file_changes
+    if file_changes:
+        lines.append("[reverse bold magenta] MODIFIED FILES [/reverse bold magenta]")
+        lines.append("")
+        symbols = {
+            "created": "[green]+[/green]",
+            "modified": "[yellow]~[/yellow]",
+            "deleted": "[red]-[/red]",
+        }
+        for path, action in file_changes:
+            symbol = symbols.get(action, "[dim]?[/dim]")
+            lines.append(f"  {symbol} {escape(path)}")
         lines.append("")
 
     if prompt.blocks:
@@ -213,7 +241,7 @@ class AplScreen(Screen):
             projects_table.border_title = "Projects"
             self._projects = model.load_projects(self.root_dir, source_filter=self.source_filter)
             for idx, p in enumerate(self._projects):
-                src_style = "green" if p.source == "agy" else ("cyan" if p.source == "claude" else "dim")
+                src_style = _source_style(p.source)
                 projects_table.add_row(
                     Text(p.display_name, style="bold cyan"),
                     Text(p.source, style=src_style),
@@ -294,7 +322,7 @@ class AplScreen(Screen):
                 tag = "[subagent]"
             else:
                 tag = ""
-            src_style = "green" if p.source == "agy" else ("blue" if p.source == "gemini" else "cyan")
+            src_style = _source_style(p.source or "claude")
             table.add_row(
                 Text(p.timestamp[:19] or "-", style="dim"),
                 Text(p.source or "claude", style=src_style),

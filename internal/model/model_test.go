@@ -43,6 +43,13 @@ func TestDetectFileFormat(t *testing.T) {
 	if got := DetectFileFormat(geminiJSONL); got != "gemini_jsonl" {
 		t.Fatalf("detect gemini_jsonl: expected 'gemini_jsonl', got %q", got)
 	}
+
+	// 6. OpenCode
+	opencodeF := filepath.Join(dir, "opencode.jsonl")
+	_ = os.WriteFile(opencodeF, []byte(`{"type":"opencode_metadata","cwd":"/test/path","sessionId":"ses_1"}`+"\n"), 0o644)
+	if got := DetectFileFormat(opencodeF); got != "opencode" {
+		t.Fatalf("detect opencode: expected 'opencode', got %q", got)
+	}
 }
 
 func TestParseClaude(t *testing.T) {
@@ -142,5 +149,138 @@ func TestParseGeminiJson(t *testing.T) {
 	}
 	if len(p.Blocks) != 1 || p.Blocks[0].Text != "w3m is a terminal web browser." {
 		t.Fatalf("unexpected block: %+v", p.Blocks)
+	}
+}
+
+func TestParseOpenCode(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "opencode.jsonl")
+	content := `{"type":"opencode_metadata","cwd":"/test/path","sessionId":"ses_1"}` + "\n" +
+		`{"type":"user","sessionId":"ses_1","timestamp":"2026-09-23T00:00:00Z","gitBranch":"","message":{"content":"hello opencode"}}` + "\n" +
+		`{"type":"assistant","sessionId":"ses_1","timestamp":"2026-09-23T00:00:05Z","gitBranch":"","message":{"content":[{"type":"text","text":"hi there"}],"usage":{"input_tokens":10,"output_tokens":20}}}` + "\n"
+	_ = os.WriteFile(f, []byte(content), 0o644)
+
+	prompts := ParseOpenCodeSessionFile(f)
+	if len(prompts) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(prompts))
+	}
+	p := prompts[0]
+	if p.Source != "opencode" {
+		t.Fatalf("expected source 'opencode', got %q", p.Source)
+	}
+	if p.UserText != "hello opencode" {
+		t.Fatalf("expected user text 'hello opencode', got %q", p.UserText)
+	}
+	if p.TotalTokens != 30 {
+		t.Fatalf("expected total tokens 30, got %d", p.TotalTokens)
+	}
+	if len(p.Blocks) != 1 || p.Blocks[0].Text != "hi there" {
+		t.Fatalf("unexpected blocks: %+v", p.Blocks)
+	}
+}
+
+func TestFileChanges(t *testing.T) {
+	// 1. Claude write and edit
+	p1 := Prompt{
+		Blocks: []AssistantBlock{
+			{Kind: "tool_use", ToolName: "Write", ToolInput: []KV{{Key: "file_path", Value: "/a/new.py"}, {Key: "content", Value: "x"}}},
+			{Kind: "tool_use", ToolName: "Edit", ToolInput: []KV{{Key: "file_path", Value: "/a/existing.py"}, {Key: "old_string", Value: "x"}, {Key: "new_string", Value: "y"}}},
+		},
+	}
+	fc1 := p1.FileChanges()
+	if len(fc1) != 2 || fc1[0] != (FileChange{Path: "/a/new.py", Action: "created"}) || fc1[1] != (FileChange{Path: "/a/existing.py", Action: "modified"}) {
+		t.Fatalf("unexpected fc1: %+v", fc1)
+	}
+
+	// 2. Edit after write stays created
+	p2 := Prompt{
+		Blocks: []AssistantBlock{
+			{Kind: "tool_use", ToolName: "Write", ToolInput: []KV{{Key: "file_path", Value: "/a/new.py"}, {Key: "content", Value: "x"}}},
+			{Kind: "tool_use", ToolName: "Edit", ToolInput: []KV{{Key: "file_path", Value: "/a/new.py"}, {Key: "old_string", Value: "x"}, {Key: "new_string", Value: "y"}}},
+		},
+	}
+	fc2 := p2.FileChanges()
+	if len(fc2) != 1 || fc2[0] != (FileChange{Path: "/a/new.py", Action: "created"}) {
+		t.Fatalf("unexpected fc2: %+v", fc2)
+	}
+
+	// 3. Bash rm and mv
+	p3 := Prompt{
+		Blocks: []AssistantBlock{
+			{Kind: "tool_use", ToolName: "Bash", ToolInput: []KV{{Key: "command", Value: "rm -rf /tmp/foo /tmp/bar"}}},
+			{Kind: "tool_use", ToolName: "Bash", ToolInput: []KV{{Key: "command", Value: "mv /tmp/old.txt /tmp/new.txt"}}},
+		},
+	}
+	fc3 := p3.FileChanges()
+	expected3 := []FileChange{
+		{Path: "/tmp/foo", Action: "deleted"},
+		{Path: "/tmp/bar", Action: "deleted"},
+		{Path: "/tmp/old.txt", Action: "deleted"},
+		{Path: "/tmp/new.txt", Action: "created"},
+	}
+	if len(fc3) != len(expected3) {
+		t.Fatalf("expected len %d, got %d: %+v", len(expected3), len(fc3), fc3)
+	}
+	for i, e := range expected3 {
+		if fc3[i] != e {
+			t.Fatalf("idx %d: expected %+v, got %+v", i, e, fc3[i])
+		}
+	}
+
+	// 4. AGY tools
+	p4 := Prompt{
+		Blocks: []AssistantBlock{
+			{Kind: "tool_use", ToolName: "write_to_file", ToolInput: []KV{{Key: "TargetFile", Value: "/a/x.py"}}},
+			{Kind: "tool_use", ToolName: "replace_file_content", ToolInput: []KV{{Key: "TargetFile", Value: "/a/y.py"}}},
+			{Kind: "tool_use", ToolName: "run_command", ToolInput: []KV{{Key: "CommandLine", Value: "rm -f /tmp/z.txt"}}},
+		},
+	}
+	fc4 := p4.FileChanges()
+	expected4 := []FileChange{
+		{Path: "/a/x.py", Action: "created"},
+		{Path: "/a/y.py", Action: "modified"},
+		{Path: "/tmp/z.txt", Action: "deleted"},
+	}
+	if len(fc4) != len(expected4) {
+		t.Fatalf("expected len %d, got %d: %+v", len(expected4), len(fc4), fc4)
+	}
+	for i, e := range expected4 {
+		if fc4[i] != e {
+			t.Fatalf("idx %d: expected %+v, got %+v", i, e, fc4[i])
+		}
+	}
+
+	// 5. OpenCode edit tool
+	p5 := Prompt{
+		Blocks: []AssistantBlock{
+			{Kind: "tool_use", ToolName: "edit", ToolInput: []KV{{Key: "filePath", Value: "/a/new.py"}, {Key: "newString", Value: "x"}}},
+			{Kind: "tool_use", ToolName: "edit", ToolInput: []KV{{Key: "filePath", Value: "/a/old.py"}, {Key: "oldString", Value: "x"}, {Key: "newString", Value: "y"}}},
+			{Kind: "tool_use", ToolName: "bash", ToolInput: []KV{{Key: "command", Value: "rm /tmp/gone.py"}}},
+		},
+	}
+	fc5 := p5.FileChanges()
+	expected5 := []FileChange{
+		{Path: "/a/new.py", Action: "created"},
+		{Path: "/a/old.py", Action: "modified"},
+		{Path: "/tmp/gone.py", Action: "deleted"},
+	}
+	if len(fc5) != len(expected5) {
+		t.Fatalf("expected len %d, got %d: %+v", len(expected5), len(fc5), fc5)
+	}
+	for i, e := range expected5 {
+		if fc5[i] != e {
+			t.Fatalf("idx %d: expected %+v, got %+v", i, e, fc5[i])
+		}
+	}
+
+	// 6. Gemini write_file
+	p6 := Prompt{
+		Blocks: []AssistantBlock{
+			{Kind: "tool_use", ToolName: "write_file", ToolInput: []KV{{Key: "file_path", Value: "out.py"}}},
+		},
+	}
+	fc6 := p6.FileChanges()
+	if len(fc6) != 1 || fc6[0] != (FileChange{Path: "out.py", Action: "created"}) {
+		t.Fatalf("unexpected fc6: %+v", fc6)
 	}
 }

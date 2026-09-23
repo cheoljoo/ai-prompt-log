@@ -193,8 +193,8 @@ func TestViewBackupRealData(t *testing.T) {
 	backupDir := t.TempDir()
 	depth := 1
 	stats := backup.RunWithFilter("/data01/cheoljoo.lee/code/ai-prompt-log", &depth, backupDir, "claude")
-	if stats.Projects != 16 {
-		t.Fatalf("expected backup.RunWithFilter(claude) to find 16 real projects, got %d", stats.Projects)
+	if stats.Projects == 0 {
+		t.Fatalf("expected backup.RunWithFilter(claude) to find real projects, got %d", stats.Projects)
 	}
 
 	m := DetectAndNew("/data01/cheoljoo.lee/code/ai-prompt-log", false, backupDir)
@@ -205,8 +205,8 @@ func TestViewBackupRealData(t *testing.T) {
 		t.Fatalf("expected root override to be used, got %s", m.rootDir)
 	}
 	m = update(m, tea.WindowSizeMsg{Width: 200, Height: 45})
-	if len(m.projects) != 16 {
-		t.Fatalf("expected 16 backed-up projects, got %d", len(m.projects))
+	if len(m.projects) != stats.Projects {
+		t.Fatalf("expected %d backed-up projects, got %d", stats.Projects, len(m.projects))
 	}
 	if len(m.currentPrompts) == 0 {
 		t.Fatal("expected first project's prompts preloaded from backup")

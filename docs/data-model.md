@@ -94,3 +94,48 @@ Antigravity CLI (agy) 및 Gemini CLI 로그도 Claude Code와 동일한 인터�
   {"type": "agy_metadata", "cwd": "/path/to/project", "sessionId": "<conv_id>", "gitBranch": "<branch>"}
   ```
 - 이로써 SQLite DB에 의존하지 않고도 백업 디렉터리(`apl --view-backup`)에서 프로젝트 경로 및 브랜치를 완벽하게 복원할 수 있다.
+
+## 9. OpenCode 규격
+
+OpenCode 세션 로그도 Claude Code, AGY와 동일하게 탐색, 뷰, 백업을 지원한다:
+
+### 9-1. 파일 위치 및 저장 방식
+- SQLite 데이터베이스: `~/.local/share/opencode/opencode.db`
+  - `session`: `id`, `directory` (cwd), `title`, `parent_id`, `time_updated`
+  - `message`: `id`, `session_id`, `time_created`, `data` (role, time 등)
+  - `part`: `message_id`, `session_id`, `time_created`, `data` (text, tool, step-finish 등)
+- 캐시 구체화: `~/.cache/ai-prompt-log/opencode/<session_id>.jsonl`
+  - 세션의 `time_updated`가 캐시 파일의 mtime보다 최신일 때만 다시 구체화(materialize)
+  - Claude-스키마 형태의 jsonl로 변환하여 저장:
+    - 1번 줄: `{"type": "opencode_metadata", "cwd": "<dir>", "sessionId": "<id>"}`
+    - 2번 줄 이후: `{"type": "user", ...}`, `{"type": "assistant", ...}`
+
+### 9-2. 백업 포맷
+- 백업 대상 디렉터리에 `opencode-<session_id>.jsonl` 형태로 복사되며, 선두의 `opencode_metadata`를 통해 복원 시 SQLite 없이도 프로젝트 경로 및 세션을 즉시 식별한다.
+
+## 10. 수정된 파일 (MODIFIED FILES) 요약
+
+프롬프트 실행 결과로 생성, 수정, 삭제된 파일 목록을 도구 호출(tool_use)에서 분석하여 Detail 창의 `FINAL-RESULT` 아래에 요약 표시한다:
+
+### 10-1. 도구별 판정 기준
+- **Claude Code**:
+  - `Write`: `file_path` -> `created`
+  - `Edit` / `MultiEdit`: `file_path` -> `modified`
+  - `NotebookEdit`: `notebook_path` -> `modified`
+- **Antigravity CLI (agy)**:
+  - `write_to_file`: `TargetFile` -> `created`
+  - `replace_file_content`: `TargetFile` -> `modified`
+- **OpenCode**:
+  - `edit`: `filePath` -> `oldString`이 존재하면 `modified`, 없으면 `created`
+- **Gemini CLI**:
+  - `write_file`: `file_path` -> `created`
+- **쉘 명령 (Bash / run_command / bash)**:
+  - `rm`, `rmdir` -> `deleted`
+  - `touch`, `mkdir` -> `created`
+  - `mv <src> <dst>` -> `<src>`: `deleted`, `<dst>`: `created`
+  - `cp <src> <dst>` -> `<dst>`: `created`
+
+### 10-2. 파일별 병합(Net Effect) 규칙
+- 동일 프롬프트 내에서 동일 파일에 대해 여러 작업이 일어날 경우:
+  - 이전에 `created`된 파일에 대해 이후 `modified`가 발생해도 상태는 `created`를 유지한다.
+  - 그 외의 경우 나중에 발생한 작업(`created`/`deleted`/`modified`)이 이전 상태를 갱신한다.

@@ -1,4 +1,5 @@
-// Package source locates Claude Code, Antigravity CLI (agy), and Gemini CLI session files.
+// Package source locates Claude Code, Antigravity CLI (agy), Gemini CLI,
+// and OpenCode session files.
 //
 // Reference: docs/data-model.md
 package source
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -47,6 +49,35 @@ func GeminiTmpDir() string {
 	return filepath.Join(home, ".gemini", "tmp")
 }
 
+// OpenCodeDataDir returns ~/.local/share/opencode for OpenCode sessions.
+func OpenCodeDataDir() string {
+	if v := os.Getenv("OPENCODE_DATA_DIR"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "opencode")
+}
+
+// OpenCodeCacheDir returns ~/.cache/ai-prompt-log/opencode for materialized OpenCode transcripts.
+func OpenCodeCacheDir() string {
+	if v := os.Getenv("OPENCODE_CACHE_DIR"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cache", "ai-prompt-log", "opencode")
+}
+
+// OpenCodeDBPath returns the path to opencode.db.
+func OpenCodeDBPath() string {
+	return filepath.Join(OpenCodeDataDir(), "opencode.db")
+}
+
 // EncodePath mirrors Claude Code's lossy cwd -> directory name encoding.
 func EncodePath(path string) string {
 	return nonAlnum.ReplaceAllString(path, "-")
@@ -54,6 +85,15 @@ func EncodePath(path string) string {
 
 // AgyConvInfo holds metadata for one Antigravity CLI conversation.
 type AgyConvInfo struct {
+	ID             string
+	Workspace      string
+	Branch         string
+	Title          string
+	TranscriptPath string
+}
+
+// OpenCodeConvInfo holds metadata for one OpenCode conversation.
+type OpenCodeConvInfo struct {
 	ID             string
 	Workspace      string
 	Branch         string
@@ -284,14 +324,295 @@ func ScanGeminiTmpProjects(baseDir string) []GeminiProjectInfo {
 	return projects
 }
 
+func opencodeISO(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
+}
+
+func opencodeText(db *sql.DB, messageID string) string {
+	rows, err := db.Query("SELECT data FROM part WHERE message_id=? ORDER BY time_created", messageID)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+
+	var texts []string
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			continue
+		}
+		var pdata struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(raw), &pdata); err == nil {
+			if pdata.Type == "text" && pdata.Text != "" {
+				texts = append(texts, pdata.Text)
+			}
+		}
+	}
+	return strings.Join(texts, "\n")
+}
+
+func opencodeAssistantBlocks(db *sql.DB, messageID string) ([]map[string]interface{}, map[string]int64) {
+	rows, err := db.Query("SELECT data FROM part WHERE message_id=? ORDER BY time_created", messageID)
+	if err != nil {
+		return nil, nil
+	}
+	defer rows.Close()
+
+	var blocks []map[string]interface{}
+	usage := map[string]int64{
+		"input_tokens":                0,
+		"output_tokens":               0,
+		"cache_read_input_tokens":     0,
+		"cache_creation_input_tokens": 0,
+	}
+
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			continue
+		}
+		var pdata struct {
+			Type   string          `json:"type"`
+			Text   string          `json:"text"`
+			Tool   string          `json:"tool"`
+			State  json.RawMessage `json:"state"`
+			Tokens struct {
+				Input  int64 `json:"input"`
+				Output int64 `json:"output"`
+				Cache  struct {
+					Read  int64 `json:"read"`
+					Write int64 `json:"write"`
+				} `json:"cache"`
+			} `json:"tokens"`
+		}
+		if err := json.Unmarshal([]byte(raw), &pdata); err != nil {
+			continue
+		}
+		switch pdata.Type {
+		case "text":
+			if pdata.Text != "" {
+				blocks = append(blocks, map[string]interface{}{
+					"type": "text",
+					"text": pdata.Text,
+				})
+			}
+		case "tool":
+			toolName := pdata.Tool
+			if toolName == "" {
+				toolName = "?"
+			}
+			var st struct {
+				Input map[string]interface{} `json:"input"`
+			}
+			if len(pdata.State) > 0 {
+				_ = json.Unmarshal(pdata.State, &st)
+			}
+			if st.Input == nil {
+				st.Input = make(map[string]interface{})
+			}
+			blocks = append(blocks, map[string]interface{}{
+				"type":  "tool_use",
+				"name":  toolName,
+				"input": st.Input,
+			})
+		case "step-finish":
+			usage["input_tokens"] += pdata.Tokens.Input
+			usage["output_tokens"] += pdata.Tokens.Output
+			usage["cache_read_input_tokens"] += pdata.Tokens.Cache.Read
+			usage["cache_creation_input_tokens"] += pdata.Tokens.Cache.Write
+		}
+	}
+	return blocks, usage
+}
+
+func materializeOpenCodeSession(
+	db *sql.DB,
+	sessionID, directory, parentID string,
+	cacheDir string,
+	timeUpdated int64,
+) string {
+	_ = os.MkdirAll(cacheDir, 0o755)
+	cacheFile := filepath.Join(cacheDir, sessionID+".jsonl")
+	updatedSec := float64(timeUpdated) / 1000.0
+
+	if fi, err := os.Stat(cacheFile); err == nil {
+		if fi.Size() > 0 && float64(fi.ModTime().UnixNano())/1e9 >= updatedSec {
+			return cacheFile
+		}
+	}
+
+	type msgItem struct {
+		id  string
+		raw string
+	}
+	rows, err := db.Query("SELECT id, data FROM message WHERE session_id=? ORDER BY time_created", sessionID)
+	if err != nil {
+		return ""
+	}
+	var messages []msgItem
+	for rows.Next() {
+		var m msgItem
+		if err := rows.Scan(&m.id, &m.raw); err == nil {
+			messages = append(messages, m)
+		}
+	}
+	rows.Close()
+
+	isSidechain := parentID != ""
+	metaHeader, _ := json.Marshal(map[string]string{
+		"type":      "opencode_metadata",
+		"cwd":       directory,
+		"sessionId": sessionID,
+	})
+	lines := []string{string(metaHeader)}
+
+	for _, m := range messages {
+		var mdata struct {
+			Role string `json:"role"`
+			Time struct {
+				Created   int64 `json:"created"`
+				Completed int64 `json:"completed"`
+			} `json:"time"`
+		}
+		if err := json.Unmarshal([]byte(m.raw), &mdata); err != nil {
+			continue
+		}
+
+		if mdata.Role == "user" {
+			text := opencodeText(db, m.id)
+			rec, _ := json.Marshal(map[string]interface{}{
+				"type":        "user",
+				"sessionId":   sessionID,
+				"timestamp":   opencodeISO(mdata.Time.Created),
+				"gitBranch":   "",
+				"isSidechain": isSidechain,
+				"message": map[string]interface{}{
+					"content": text,
+				},
+			})
+			lines = append(lines, string(rec))
+		} else if mdata.Role == "assistant" {
+			blocks, usage := opencodeAssistantBlocks(db, m.id)
+			ts := mdata.Time.Completed
+			if ts == 0 {
+				ts = mdata.Time.Created
+			}
+			rec, _ := json.Marshal(map[string]interface{}{
+				"type":        "assistant",
+				"sessionId":   sessionID,
+				"timestamp":   opencodeISO(ts),
+				"gitBranch":   "",
+				"isSidechain": isSidechain,
+				"message": map[string]interface{}{
+					"content": blocks,
+					"usage":   usage,
+				},
+			})
+			lines = append(lines, string(rec))
+		}
+	}
+
+	if len(lines) <= 1 {
+		return ""
+	}
+
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(cacheFile, []byte(content), 0o644); err != nil {
+		return ""
+	}
+	return cacheFile
+}
+
+// ScanOpenCodeConversations returns all OpenCode sessions materialized to Claude-schema cache files.
+func ScanOpenCodeConversations(dbPath, cacheDir string) []OpenCodeConvInfo {
+	if dbPath == "" {
+		dbPath = OpenCodeDBPath()
+	}
+	if cacheDir == "" {
+		cacheDir = OpenCodeCacheDir()
+	}
+
+	var convs []OpenCodeConvInfo
+	if fi, err := os.Stat(dbPath); err != nil || fi.IsDir() {
+		return convs
+	}
+
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		return convs
+	}
+	defer db.Close()
+
+	rows, err := db.Query("SELECT id, directory, title, parent_id, time_updated FROM session")
+	if err != nil {
+		return convs
+	}
+	defer rows.Close()
+
+	type sessItem struct {
+		id          string
+		directory   sql.NullString
+		title       sql.NullString
+		parentID    sql.NullString
+		timeUpdated sql.NullInt64
+	}
+	var sessions []sessItem
+	for rows.Next() {
+		var s sessItem
+		if err := rows.Scan(&s.id, &s.directory, &s.title, &s.parentID, &s.timeUpdated); err == nil {
+			sessions = append(sessions, s)
+		}
+	}
+	rows.Close()
+
+	for _, s := range sessions {
+		dir := ""
+		if s.directory.Valid {
+			dir = s.directory.String
+		}
+		title := ""
+		if s.title.Valid {
+			title = s.title.String
+		}
+		parentID := ""
+		if s.parentID.Valid {
+			parentID = s.parentID.String
+		}
+		var timeUp int64
+		if s.timeUpdated.Valid {
+			timeUp = s.timeUpdated.Int64
+		}
+
+		transcript := materializeOpenCodeSession(db, s.id, dir, parentID, cacheDir, timeUp)
+		if transcript != "" {
+			convs = append(convs, OpenCodeConvInfo{
+				ID:             s.id,
+				Workspace:      dir,
+				Branch:         "",
+				Title:          title,
+				TranscriptPath: transcript,
+			})
+		}
+	}
+
+	return convs
+}
+
 // DirectProjectInfo holds all discovered session files across sources for a direct project.
 type DirectProjectInfo struct {
-	Cwd         string
-	DisplayName string
-	Path        string
-	ClaudeFiles []string
-	AgyConvs    []AgyConvInfo
-	GeminiFiles []string
+	Cwd           string
+	DisplayName   string
+	Path          string
+	ClaudeFiles   []string
+	AgyConvs      []AgyConvInfo
+	GeminiFiles   []string
+	OpenCodeConvs []OpenCodeConvInfo
 }
 
 // FindDirectProjectInfo walks up from cwd to find the nearest ancestor with recorded sessions.
@@ -304,12 +625,17 @@ func FindDirectProjectInfo(cwd string, sourceFilter string) DirectProjectInfo {
 
 	includeClaude := sourceFilter == "all" || sourceFilter == "claude"
 	includeAgy := sourceFilter == "all" || sourceFilter == "agy" || sourceFilter == "gemini"
+	includeOpenCode := sourceFilter == "all" || sourceFilter == "opencode"
 
 	var allAgy []AgyConvInfo
 	var allGemini []GeminiProjectInfo
+	var allOpenCode []OpenCodeConvInfo
 	if includeAgy {
 		allAgy = ScanAgyConversations("")
 		allGemini = ScanGeminiTmpProjects("")
+	}
+	if includeOpenCode {
+		allOpenCode = ScanOpenCodeConversations("", "")
 	}
 
 	for {
@@ -340,14 +666,27 @@ func FindDirectProjectInfo(cwd string, sourceFilter string) DirectProjectInfo {
 			}
 		}
 
-		if len(claudeFiles) > 0 || len(agyConvs) > 0 || len(geminiFiles) > 0 {
+		var opencodeConvs []OpenCodeConvInfo
+		if includeOpenCode {
+			for _, c := range allOpenCode {
+				if c.Workspace != "" {
+					wsClean := filepath.Clean(c.Workspace)
+					if wsClean == cur {
+						opencodeConvs = append(opencodeConvs, c)
+					}
+				}
+			}
+		}
+
+		if len(claudeFiles) > 0 || len(agyConvs) > 0 || len(geminiFiles) > 0 || len(opencodeConvs) > 0 {
 			return DirectProjectInfo{
-				Cwd:         cur,
-				DisplayName: filepath.Base(cur),
-				Path:        cur,
-				ClaudeFiles: claudeFiles,
-				AgyConvs:    agyConvs,
-				GeminiFiles: geminiFiles,
+				Cwd:           cur,
+				DisplayName:   filepath.Base(cur),
+				Path:          cur,
+				ClaudeFiles:   claudeFiles,
+				AgyConvs:      agyConvs,
+				GeminiFiles:   geminiFiles,
+				OpenCodeConvs: opencodeConvs,
 			}
 		}
 

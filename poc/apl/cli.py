@@ -39,8 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
         prog="apl",
         description=(
             "apl (AI Prompt Log viewer) - a tig-style TUI for browsing "
-            "Claude Code and Antigravity CLI (agy / gemini) session logs, read directly "
-            "from ~/.claude/projects and ~/.gemini/antigravity-cli (no copying).\n\n"
+            "Claude Code, Antigravity CLI (agy / gemini), and OpenCode "
+            "session logs, read directly from ~/.claude/projects, "
+            "~/.gemini/antigravity-cli, and ~/.local/share/opencode "
+            "(no copying).\n\n"
             "Plain `apl` shows just the current project's own prompts "
             "(2 panes: Prompts | Detail). `apl --all` shows every project "
             "at once (3 panes: Projects | Prompts | Detail).\n\n"
@@ -102,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     source_grp.add_argument(
         "-s",
         "--source",
-        choices=["all", "claude", "agy", "gemini"],
+        choices=["all", "claude", "agy", "gemini", "opencode"],
         default=None,
         help="AI assistant log source to display (default: all available)",
     )
@@ -121,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Display only Antigravity / Gemini CLI logs (alias for --agy)",
     )
+    source_grp.add_argument(
+        "--opencode",
+        action="store_true",
+        help="Display only OpenCode logs",
+    )
 
     return parser
 
@@ -138,6 +145,8 @@ def main() -> None:
         source_filter = "agy"
     elif args.claude:
         source_filter = "claude"
+    elif args.opencode:
+        source_filter = "opencode"
     elif args.source:
         source_filter = "agy" if args.source == "gemini" else args.source
     else:

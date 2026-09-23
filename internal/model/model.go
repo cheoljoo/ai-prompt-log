@@ -209,7 +209,218 @@ type Prompt struct {
 	UserText    string
 	Blocks      []AssistantBlock
 	TotalTokens int64
-	Source      string // "claude" | "agy" | "gemini"
+	Source      string // "claude" | "agy" | "gemini" | "opencode"
+}
+
+// FileChange represents one created, modified, or deleted file derived from tool calls.
+type FileChange struct {
+	Path   string
+	Action string // "created" | "modified" | "deleted"
+}
+
+func (p *Prompt) FileChanges() []FileChange {
+	return ExtractFileChanges(p)
+}
+
+var bashStmtSepRE = regexp.MustCompile(`&&|\|\||;|\n`)
+var (
+	rmCmdRE    = regexp.MustCompile(`^(?:rm|rmdir)\b(.*)$`)
+	touchCmdRE = regexp.MustCompile(`^touch\b(.*)$`)
+	mkdirCmdRE = regexp.MustCompile(`^mkdir\b(.*)$`)
+	mvCmdRE    = regexp.MustCompile(`^mv\b(.*)$`)
+	cpCmdRE    = regexp.MustCompile(`^cp\b(.*)$`)
+)
+
+func parseShellArgs(raw string) []string {
+	var args []string
+	inQuote := rune(0)
+	var cur strings.Builder
+	for _, r := range raw {
+		switch {
+		case inQuote != 0:
+			if r == inQuote {
+				inQuote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			inQuote = r
+		case r == ' ' || r == '\t':
+			if cur.Len() > 0 {
+				args = append(args, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 {
+		args = append(args, cur.String())
+	}
+	return args
+}
+
+func bashFileOps(command string) []FileChange {
+	if command == "" {
+		return nil
+	}
+	var ops []FileChange
+	stmts := bashStmtSepRE.Split(command, -1)
+	for _, stmt := range stmts {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		if m := rmCmdRE.FindStringSubmatch(stmt); m != nil {
+			for _, a := range parseShellArgs(m[1]) {
+				if !strings.HasPrefix(a, "-") {
+					ops = append(ops, FileChange{Path: a, Action: "deleted"})
+				}
+			}
+			continue
+		}
+		if m := touchCmdRE.FindStringSubmatch(stmt); m != nil {
+			for _, a := range parseShellArgs(m[1]) {
+				if !strings.HasPrefix(a, "-") {
+					ops = append(ops, FileChange{Path: a, Action: "created"})
+				}
+			}
+			continue
+		}
+		if m := mkdirCmdRE.FindStringSubmatch(stmt); m != nil {
+			for _, a := range parseShellArgs(m[1]) {
+				if !strings.HasPrefix(a, "-") {
+					ops = append(ops, FileChange{Path: a, Action: "created"})
+				}
+			}
+			continue
+		}
+		if m := mvCmdRE.FindStringSubmatch(stmt); m != nil {
+			var nonFlags []string
+			for _, a := range parseShellArgs(m[1]) {
+				if !strings.HasPrefix(a, "-") {
+					nonFlags = append(nonFlags, a)
+				}
+			}
+			if len(nonFlags) >= 2 {
+				ops = append(ops, FileChange{Path: nonFlags[0], Action: "deleted"})
+				ops = append(ops, FileChange{Path: nonFlags[len(nonFlags)-1], Action: "created"})
+			}
+			continue
+		}
+		if m := cpCmdRE.FindStringSubmatch(stmt); m != nil {
+			var nonFlags []string
+			for _, a := range parseShellArgs(m[1]) {
+				if !strings.HasPrefix(a, "-") {
+					nonFlags = append(nonFlags, a)
+				}
+			}
+			if len(nonFlags) >= 2 {
+				ops = append(ops, FileChange{Path: nonFlags[len(nonFlags)-1], Action: "created"})
+			}
+			continue
+		}
+	}
+	return ops
+}
+
+func getToolInputString(kvs []KV, key string) string {
+	for _, kv := range kvs {
+		if kv.Key == key {
+			if s, ok := kv.Value.(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func hasToolInputKey(kvs []KV, key string) bool {
+	for _, kv := range kvs {
+		if kv.Key == key {
+			if s, ok := kv.Value.(string); ok {
+				return s != ""
+			}
+			return kv.Value != nil
+		}
+	}
+	return false
+}
+
+// ExtractFileChanges returns a best-effort list of (path, action) file changes
+// derived from tool calls across all sources.
+func ExtractFileChanges(p *Prompt) []FileChange {
+	if p == nil {
+		return nil
+	}
+	var raw []FileChange
+	for _, block := range p.Blocks {
+		if block.Kind != "tool_use" {
+			continue
+		}
+		name := block.ToolName
+		switch name {
+		case "Write":
+			if path := getToolInputString(block.ToolInput, "file_path"); path != "" {
+				raw = append(raw, FileChange{Path: path, Action: "created"})
+			}
+		case "Edit", "MultiEdit":
+			if path := getToolInputString(block.ToolInput, "file_path"); path != "" {
+				raw = append(raw, FileChange{Path: path, Action: "modified"})
+			}
+		case "NotebookEdit":
+			if path := getToolInputString(block.ToolInput, "notebook_path"); path != "" {
+				raw = append(raw, FileChange{Path: path, Action: "modified"})
+			}
+		case "write_to_file":
+			if path := getToolInputString(block.ToolInput, "TargetFile"); path != "" {
+				raw = append(raw, FileChange{Path: path, Action: "created"})
+			}
+		case "replace_file_content":
+			if path := getToolInputString(block.ToolInput, "TargetFile"); path != "" {
+				raw = append(raw, FileChange{Path: path, Action: "modified"})
+			}
+		case "write_file":
+			if path := getToolInputString(block.ToolInput, "file_path"); path != "" {
+				raw = append(raw, FileChange{Path: path, Action: "created"})
+			}
+		case "edit": // OpenCode's edit tool
+			if path := getToolInputString(block.ToolInput, "filePath"); path != "" {
+				action := "created"
+				if hasToolInputKey(block.ToolInput, "oldString") {
+					action = "modified"
+				}
+				raw = append(raw, FileChange{Path: path, Action: action})
+			}
+		case "Bash", "run_shell_command", "bash":
+			if cmd := getToolInputString(block.ToolInput, "command"); cmd != "" {
+				raw = append(raw, bashFileOps(cmd)...)
+			}
+		case "run_command":
+			if cmd := getToolInputString(block.ToolInput, "CommandLine"); cmd != "" {
+				raw = append(raw, bashFileOps(cmd)...)
+			}
+		}
+	}
+
+	merged := make(map[string]string)
+	var order []string
+	for _, item := range raw {
+		prev, exists := merged[item.Path]
+		if exists && prev == "created" && item.Action == "modified" {
+			continue
+		}
+		if !exists {
+			order = append(order, item.Path)
+		}
+		merged[item.Path] = item.Action
+	}
+
+	out := make([]FileChange, 0, len(order))
+	for _, path := range order {
+		out = append(out, FileChange{Path: path, Action: merged[path]})
+	}
+	return out
 }
 
 func (p *Prompt) IsCommand() bool {
@@ -465,6 +676,9 @@ func DetectFileFormat(path string) string {
 		rtype, _ := rec["type"].(string)
 		if rtype == "agy_metadata" {
 			return "agy"
+		}
+		if rtype == "opencode_metadata" {
+			return "opencode"
 		}
 		if rtype == "gemini_metadata" {
 			return "gemini_jsonl"
@@ -840,12 +1054,23 @@ func ParseGeminiJsonlFile(path string) []Prompt {
 	return prompts
 }
 
+// ParseOpenCodeSessionFile returns the Prompts found in a materialized OpenCode session jsonl.
+func ParseOpenCodeSessionFile(path string) []Prompt {
+	prompts := ParseClaudeSessionFile(path)
+	for i := range prompts {
+		prompts[i].Source = "opencode"
+	}
+	return prompts
+}
+
 // ParseSessionFile returns the Prompts found in a session file according to detected format.
 func ParseSessionFile(path string, defaultBranch, sessionID string) []Prompt {
 	fmtType := DetectFileFormat(path)
 	switch fmtType {
 	case "agy":
 		return ParseAgyTranscriptFile(path, sessionID, defaultBranch)
+	case "opencode":
+		return ParseOpenCodeSessionFile(path)
 	case "gemini_json":
 		return ParseGeminiJsonFile(path)
 	case "gemini_jsonl":
@@ -1052,6 +1277,24 @@ func LoadProjectWithFilter(target, sourceFilter string) Project {
 		sourcesFound["gemini"] = true
 	}
 
+	for _, c := range info.OpenCodeConvs {
+		if c.TranscriptPath != "" {
+			if _, err := os.Stat(c.TranscriptPath); err == nil {
+				allFiles = append(allFiles, c.TranscriptPath)
+				m := map[string]string{
+					"id":        c.ID,
+					"workspace": c.Workspace,
+					"branch":    c.Branch,
+					"title":     c.Title,
+				}
+				metadata[c.ID] = m
+				tstem := strings.TrimSuffix(filepath.Base(c.TranscriptPath), filepath.Ext(c.TranscriptPath))
+				metadata[tstem] = m
+				sourcesFound["opencode"] = true
+			}
+		}
+	}
+
 	var srcKeys []string
 	for k := range sourcesFound {
 		srcKeys = append(srcKeys, k)
@@ -1059,8 +1302,8 @@ func LoadProjectWithFilter(target, sourceFilter string) Project {
 	sort.Strings(srcKeys)
 	srcLabel := strings.Join(srcKeys, "+")
 	if srcLabel == "" {
-		if sourceFilter == "claude" {
-			srcLabel = "claude"
+		if sourceFilter == "claude" || sourceFilter == "opencode" {
+			srcLabel = sourceFilter
 		} else {
 			srcLabel = "agy"
 		}
@@ -1125,17 +1368,19 @@ func LoadProjectsWithFilter(aggregateRoot, sourceFilter string) []Project {
 		return out
 	}
 
-	// 3. Global multi-source aggregate (Claude + AGY + Gemini)
+	// 3. Global multi-source aggregate (Claude + AGY + Gemini + OpenCode)
 	includeClaude := sourceFilter == "all" || sourceFilter == "claude"
 	includeAgy := sourceFilter == "all" || sourceFilter == "agy" || sourceFilter == "gemini"
+	includeOpenCode := sourceFilter == "all" || sourceFilter == "opencode"
 
 	type wsEntry struct {
-		cwd         string
-		displayName string
-		claudeFiles []string
-		agyConvs    []source.AgyConvInfo
-		geminiFiles []string
-		metadata    map[string]map[string]string
+		cwd           string
+		displayName   string
+		claudeFiles   []string
+		agyConvs      []source.AgyConvInfo
+		geminiFiles   []string
+		opencodeConvs []source.OpenCodeConvInfo
+		metadata      map[string]map[string]string
 	}
 	projectsByWS := make(map[string]*wsEntry)
 	getOrCreate := func(ws string) *wsEntry {
@@ -1197,6 +1442,26 @@ func LoadProjectsWithFilter(aggregateRoot, sourceFilter string) []Project {
 		}
 	}
 
+	if includeOpenCode {
+		for _, c := range source.ScanOpenCodeConversations("", "") {
+			ws := c.Workspace
+			if ws == "" {
+				ws = "opencode-" + c.ID
+				if len(ws) > 17 {
+					ws = ws[:17]
+				}
+			}
+			e := getOrCreate(ws)
+			e.opencodeConvs = append(e.opencodeConvs, c)
+			e.metadata[c.ID] = map[string]string{
+				"id":        c.ID,
+				"workspace": c.Workspace,
+				"branch":    c.Branch,
+				"title":     c.Title,
+			}
+		}
+	}
+
 	var sortedWS []string
 	for ws := range projectsByWS {
 		sortedWS = append(sortedWS, ws)
@@ -1224,6 +1489,16 @@ func LoadProjectsWithFilter(aggregateRoot, sourceFilter string) []Project {
 		for _, gf := range entry.geminiFiles {
 			allFiles = append(allFiles, gf)
 			sourcesFound["gemini"] = true
+		}
+		for _, c := range entry.opencodeConvs {
+			if c.TranscriptPath != "" {
+				if _, err := os.Stat(c.TranscriptPath); err == nil {
+					allFiles = append(allFiles, c.TranscriptPath)
+					tstem := strings.TrimSuffix(filepath.Base(c.TranscriptPath), filepath.Ext(c.TranscriptPath))
+					entry.metadata[tstem] = entry.metadata[c.ID]
+					sourcesFound["opencode"] = true
+				}
+			}
 		}
 
 		if len(allFiles) == 0 {
