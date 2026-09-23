@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/cheoljoo/ai-prompt-log/compare/v0.4.0...v0.5.0) (2026-09-23)
+
+
+### Features
+
+* add OpenCode support and modified files tracking (Python & Go) ([#11](https://github.com/cheoljoo/ai-prompt-log/issues/11)) ([661542d](https://github.com/cheoljoo/ai-prompt-log/commit/661542d24206d3972ce50bf803e82d7614b38240))
+
 ## [0.4.0](https://github.com/cheoljoo/ai-prompt-log/compare/v0.3.0...v0.4.0) (2026-09-19)
 
 
