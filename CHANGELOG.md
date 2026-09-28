@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/cheoljoo/ai-prompt-log/compare/v0.6.0...v0.7.0) (2026-09-28)
+
+
+### Features
+
+* add --save JSON export with --since/--days date filtering ([#15](https://github.com/cheoljoo/ai-prompt-log/issues/15)) ([c381c35](https://github.com/cheoljoo/ai-prompt-log/commit/c381c35dd546e0581e60f8502e06512ec916c926))
+
 ## [0.6.0](https://github.com/cheoljoo/ai-prompt-log/compare/v0.5.0...v0.6.0) (2026-09-28)
 
 
