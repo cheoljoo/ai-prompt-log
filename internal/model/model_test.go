@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDetectFileFormat(t *testing.T) {
@@ -229,6 +230,80 @@ func TestParseCopilot(t *testing.T) {
 	}
 	if p.Blocks[1].Kind != "text" || p.Blocks[1].Text != "Done." {
 		t.Fatalf("unexpected block 1: %+v", p.Blocks[1])
+	}
+	if p.Timestamp != "2026-09-28T03:55:49.761Z" {
+		t.Fatalf("unexpected start timestamp: %q", p.Timestamp)
+	}
+	if p.EndTimestamp != "2026-09-28T03:55:55.000Z" {
+		t.Fatalf("unexpected end timestamp: %q", p.EndTimestamp)
+	}
+	if p.FinalResult() != "Done." {
+		t.Fatalf("unexpected final result: %q", p.FinalResult())
+	}
+}
+
+func TestParseTimestampLoose(t *testing.T) {
+	cases := []string{
+		"2026-09-28T03:55:49.761Z",
+		"2026-09-28T03:55:49Z",
+		"2026-09-23T04:00:00+00:00",
+		"2026-09-23T04:00:00",
+	}
+	for _, ts := range cases {
+		if _, ok := ParseTimestampLoose(ts); !ok {
+			t.Errorf("expected %q to parse", ts)
+		}
+	}
+	if _, ok := ParseTimestampLoose(""); ok {
+		t.Error("expected empty string to fail parsing")
+	}
+	if _, ok := ParseTimestampLoose("not-a-timestamp"); ok {
+		t.Error("expected garbage string to fail parsing")
+	}
+}
+
+func TestBuildSaveDocument(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "sess-uuid-1")
+	_ = os.MkdirAll(sessionDir, 0o755)
+	f := filepath.Join(sessionDir, "events.jsonl")
+	content := `{"type":"user.message","data":{"content":"old prompt"},"timestamp":"2020-01-01T00:00:00Z"}` + "\n" +
+		`{"type":"assistant.message","data":{"content":"old done","toolRequests":[{"toolCallId":"t1","name":"create","arguments":{"path":"/a/new.py"}}]},"timestamp":"2020-01-01T00:00:05Z"}` + "\n" +
+		`{"type":"user.message","data":{"content":"recent prompt"},"timestamp":"2026-09-28T00:00:00Z"}` + "\n" +
+		`{"type":"assistant.message","data":{"content":"recent done","toolRequests":[]},"timestamp":"2026-09-28T00:00:05Z"}` + "\n"
+	_ = os.WriteFile(f, []byte(content), 0o644)
+
+	proj := Project{
+		DisplayName:  "test-proj",
+		Cwd:          dir,
+		Source:       "copilot",
+		SessionFiles: []string{f},
+	}
+
+	// No filter: both prompts present.
+	doc := BuildSaveDocument([]Project{proj}, "copilot", nil)
+	if len(doc.Projects) != 1 || doc.Projects[0].PromptCount != 2 {
+		t.Fatalf("expected 2 prompts with no filter, got %+v", doc.Projects)
+	}
+	first := doc.Projects[0].Prompts[0]
+	if first.UserPrompt != "old prompt" || first.FinalResult != "old done" {
+		t.Fatalf("unexpected first prompt: %+v", first)
+	}
+	if len(first.ModifiedFiles) != 1 || first.ModifiedFiles[0].Path != "/a/new.py" || first.ModifiedFiles[0].Action != "created" {
+		t.Fatalf("unexpected modified files: %+v", first.ModifiedFiles)
+	}
+
+	// Since cutoff after the first prompt: only the recent one remains.
+	cutoff := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	doc2 := BuildSaveDocument([]Project{proj}, "copilot", &cutoff)
+	if len(doc2.Projects) != 1 || doc2.Projects[0].PromptCount != 1 {
+		t.Fatalf("expected 1 prompt after cutoff, got %+v", doc2.Projects)
+	}
+	if doc2.Projects[0].Prompts[0].UserPrompt != "recent prompt" {
+		t.Fatalf("expected 'recent prompt' to survive the cutoff, got %+v", doc2.Projects[0].Prompts[0])
+	}
+	if doc2.Since == "" {
+		t.Error("expected Since to be set in the document when a cutoff is given")
 	}
 }
 

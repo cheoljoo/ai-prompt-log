@@ -13,6 +13,7 @@ apl --claude      # view only Claude Code prompts
 apl --copilot     # view only GitHub Copilot CLI prompts
 apl --backup      # copy session logs to a durable backup dir (survives deleting the project)
 apl --view-backup # browse that backup                -> 3 panes, same as --all
+apl --save        # save current prompts to a JSON file, then exit
 ```
 
 Panes are shown side by side and update live as you move the cursor — no screen transitions, no need to press Enter just to preview something.
@@ -76,6 +77,13 @@ apl --backup --depth 1        # + every sibling project under the parent directo
 apl --backup --backup-dir PATH  # use a custom backup location (default: ~/ai-prompt-log.backup/)
 apl --view-backup              # browse a previous --backup (3 panes, like --all)
 
+apl --save                    # save current project's prompts to a JSON file
+apl --save --all              # save every project's prompts
+apl --save --copilot          # save only GitHub Copilot CLI prompts
+apl --save --save-file out.json  # custom output path (default: apl-save-<timestamp>.json)
+apl --save --days 7           # only include prompts from the last 7 days
+apl --save --since 2026-09-01 # only include prompts on/after this date
+
 apl --version    # or -v
 ```
 
@@ -88,6 +96,48 @@ Claude Code only keeps session logs under `~/.claude/projects/<encoded-cwd>/` �
 - `apl --backup` with no `--depth` backs up only the current project (same nearest-ancestor resolution as plain `apl`).
 - `apl --backup --depth N` walks up `N` directories from cwd and backs up *every* project whose real `cwd` (read from the logs themselves, not guessed from the encoded directory name) is that directory or a descendant of it — handy for backing up a whole `~/code/` tree of sibling projects in one go.
 - `apl --view-backup` opens the same 3-pane aggregate view as `apl --all`, but rooted at the backup directory instead of the live `~/.claude/projects`.
+
+### Saving prompts to a JSON file
+
+`apl --save` exports the same prompts you'd see in the TUI to a JSON file, then exits — handy for scripting, archiving, or feeding into other tools. It respects the same scope/source flags as the interactive view:
+
+- No `--all`: only the current project's prompts (same nearest-ancestor resolution as plain `apl`).
+- `apl --save --all`: every project, like `apl --all`.
+- Add a source flag (`--copilot`, `--claude`, `--agy`, `--opencode`, `-s/--source`) to restrict to one source.
+- `--save-file PATH`: output path (default: `apl-save-<YYYYMMDD-HHMMSS>.json` in the current directory).
+- `--since YYYY-MM-DD` or `--days N`: only include prompts starting on/after that date (mutually exclusive with each other; omit both to include everything).
+
+Each prompt is saved with its start/end time, the user prompt, the final assistant response, and the list of modified files:
+
+```json
+{
+  "generated_at": "2026-09-28T04:00:00Z",
+  "source_filter": "copilot",
+  "since": "2026-09-21T04:00:00Z",
+  "projects": [
+    {
+      "display_name": "ai-prompt-log",
+      "cwd": "/home/user/code/ai-prompt-log",
+      "source": "copilot",
+      "prompt_count": 1,
+      "prompts": [
+        {
+          "session_id": "...",
+          "source": "copilot",
+          "branch": "main",
+          "start_time": "2026-09-28T03:55:49.761Z",
+          "end_time": "2026-09-28T04:07:05.858Z",
+          "user_prompt": "...",
+          "final_result": "...",
+          "modified_files": [{ "path": "...", "action": "modified" }]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`"since"` is only present when `--since`/`--days` was given.
 
 ### Keybindings (vi-style)
 
