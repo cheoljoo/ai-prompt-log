@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/cheoljoo/ai-prompt-log/compare/v0.7.0...v0.8.0) (2026-09-28)
+
+
+### Features
+
+* add --backup --all to back up every project across all sources ([#17](https://github.com/cheoljoo/ai-prompt-log/issues/17)) ([9e84f13](https://github.com/cheoljoo/ai-prompt-log/commit/9e84f13b8cc9eaccff80855c69a8b918beac1161))
+
 ## [0.7.0](https://github.com/cheoljoo/ai-prompt-log/compare/v0.6.0...v0.7.0) (2026-09-28)
 
 
