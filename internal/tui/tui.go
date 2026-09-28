@@ -46,6 +46,7 @@ var (
 	styleRed            = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 	styleCyan           = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
 	styleGreen          = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
+	styleBrightMagenta  = lipgloss.NewStyle().Foreground(lipgloss.Color("13")).Bold(true)
 	styleBold           = lipgloss.NewStyle().Bold(true)
 	paneStyle           = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
 	paneFocusStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6"))
@@ -112,6 +113,8 @@ func formatPromptDetail(p model.Prompt) string {
 		srcBadge = styleMagenta.Render("[opencode]")
 	case "gemini":
 		srcBadge = styleBlue.Render("[gemini]")
+	case "copilot":
+		srcBadge = styleBrightMagenta.Render("[copilot]")
 	}
 	meta := []string{srcBadge, styleDim.Render(p.Timestamp)}
 	if p.Branch != "" {

@@ -78,6 +78,18 @@ func OpenCodeDBPath() string {
 	return filepath.Join(OpenCodeDataDir(), "opencode.db")
 }
 
+// CopilotStateDir returns ~/.copilot/session-state for GitHub Copilot CLI sessions.
+func CopilotStateDir() string {
+	if v := os.Getenv("COPILOT_STATE_DIR"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".copilot", "session-state")
+}
+
 // EncodePath mirrors Claude Code's lossy cwd -> directory name encoding.
 func EncodePath(path string) string {
 	return nonAlnum.ReplaceAllString(path, "-")
@@ -99,6 +111,84 @@ type OpenCodeConvInfo struct {
 	Branch         string
 	Title          string
 	TranscriptPath string
+}
+
+// CopilotConvInfo holds metadata for one GitHub Copilot CLI session.
+type CopilotConvInfo struct {
+	ID             string
+	Workspace      string
+	Branch         string
+	Title          string
+	TranscriptPath string
+}
+
+// parseFlatYAML parses workspace.yaml's flat `key: value` lines (no nested
+// structures in practice -- see docs/data-model.md). Not a general YAML
+// parser: block scalars, lists, and multi-line values are not supported.
+func parseFlatYAML(data []byte) map[string]string {
+	out := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		idx := strings.Index(line, ": ")
+		if idx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+2:])
+		if key == "" {
+			continue
+		}
+		out[key] = val
+	}
+	return out
+}
+
+// GetCopilotConvInfo reads workspace.yaml for one Copilot CLI session directory.
+func GetCopilotConvInfo(sessionID, sessionDir string) CopilotConvInfo {
+	info := CopilotConvInfo{ID: sessionID}
+	data, err := os.ReadFile(filepath.Join(sessionDir, "workspace.yaml"))
+	if err != nil {
+		return info
+	}
+	fields := parseFlatYAML(data)
+	if id := fields["id"]; id != "" {
+		info.ID = id
+	}
+	info.Workspace = fields["cwd"]
+	info.Branch = fields["branch"]
+	if name := fields["name"]; name != "" {
+		info.Title = name
+	} else {
+		info.Title = fields["summary"]
+	}
+	return info
+}
+
+// ScanCopilotSessions returns all GitHub Copilot CLI sessions with their
+// workspace, branch, and events.jsonl transcript.
+func ScanCopilotSessions(baseDir string) []CopilotConvInfo {
+	if baseDir == "" {
+		baseDir = CopilotStateDir()
+	}
+	var convs []CopilotConvInfo
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return convs
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		sessionID := e.Name()
+		sessionDir := filepath.Join(baseDir, sessionID)
+		transcript := filepath.Join(sessionDir, "events.jsonl")
+		if fi, err := os.Stat(transcript); err != nil || fi.IsDir() {
+			continue
+		}
+		info := GetCopilotConvInfo(sessionID, sessionDir)
+		info.TranscriptPath = transcript
+		convs = append(convs, info)
+	}
+	return convs
 }
 
 func parseProtobufMeta(data []byte) (workspace, branch string) {
@@ -613,6 +703,7 @@ type DirectProjectInfo struct {
 	AgyConvs      []AgyConvInfo
 	GeminiFiles   []string
 	OpenCodeConvs []OpenCodeConvInfo
+	CopilotConvs  []CopilotConvInfo
 }
 
 // FindDirectProjectInfo walks up from cwd to find the nearest ancestor with recorded sessions.
@@ -626,16 +717,21 @@ func FindDirectProjectInfo(cwd string, sourceFilter string) DirectProjectInfo {
 	includeClaude := sourceFilter == "all" || sourceFilter == "claude"
 	includeAgy := sourceFilter == "all" || sourceFilter == "agy" || sourceFilter == "gemini"
 	includeOpenCode := sourceFilter == "all" || sourceFilter == "opencode"
+	includeCopilot := sourceFilter == "all" || sourceFilter == "copilot"
 
 	var allAgy []AgyConvInfo
 	var allGemini []GeminiProjectInfo
 	var allOpenCode []OpenCodeConvInfo
+	var allCopilot []CopilotConvInfo
 	if includeAgy {
 		allAgy = ScanAgyConversations("")
 		allGemini = ScanGeminiTmpProjects("")
 	}
 	if includeOpenCode {
 		allOpenCode = ScanOpenCodeConversations("", "")
+	}
+	if includeCopilot {
+		allCopilot = ScanCopilotSessions("")
 	}
 
 	for {
@@ -678,7 +774,19 @@ func FindDirectProjectInfo(cwd string, sourceFilter string) DirectProjectInfo {
 			}
 		}
 
-		if len(claudeFiles) > 0 || len(agyConvs) > 0 || len(geminiFiles) > 0 || len(opencodeConvs) > 0 {
+		var copilotConvs []CopilotConvInfo
+		if includeCopilot {
+			for _, c := range allCopilot {
+				if c.Workspace != "" {
+					wsClean := filepath.Clean(c.Workspace)
+					if wsClean == cur {
+						copilotConvs = append(copilotConvs, c)
+					}
+				}
+			}
+		}
+
+		if len(claudeFiles) > 0 || len(agyConvs) > 0 || len(geminiFiles) > 0 || len(opencodeConvs) > 0 || len(copilotConvs) > 0 {
 			return DirectProjectInfo{
 				Cwd:           cur,
 				DisplayName:   filepath.Base(cur),
@@ -687,6 +795,7 @@ func FindDirectProjectInfo(cwd string, sourceFilter string) DirectProjectInfo {
 				AgyConvs:      agyConvs,
 				GeminiFiles:   geminiFiles,
 				OpenCodeConvs: opencodeConvs,
+				CopilotConvs:  copilotConvs,
 			}
 		}
 
