@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/cheoljoo/ai-prompt-log/compare/v0.5.0...v0.6.0) (2026-09-28)
+
+
+### Features
+
+* add GitHub Copilot CLI prompt log support ([#13](https://github.com/cheoljoo/ai-prompt-log/issues/13)) ([447c2fc](https://github.com/cheoljoo/ai-prompt-log/commit/447c2fc077fa3e657d059c0a65405a8b6d8e5a98))
+
 ## [0.5.0](https://github.com/cheoljoo/ai-prompt-log/compare/v0.4.0...v0.5.0) (2026-09-23)
 
 
