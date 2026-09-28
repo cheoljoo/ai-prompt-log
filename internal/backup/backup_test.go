@@ -33,6 +33,23 @@ func TestSelectProjectsWithDepth(t *testing.T) {
 	t.Logf("depth=1 (claude) -> %d projects (under /data01/cheoljoo.lee/code)", len(projs))
 }
 
+func TestSelectAllProjectsWithFilter(t *testing.T) {
+	projs := SelectAllProjectsWithFilter("claude")
+	if len(projs) == 0 {
+		t.Fatalf("expected --all (claude) to find at least one project, got 0")
+	}
+	found := false
+	for _, p := range projs {
+		if p.Cwd == "/data01/cheoljoo.lee/code/ai-prompt-log" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected --all to include this repo's own project among %d projects", len(projs))
+	}
+	t.Logf("--all (claude) -> %d projects", len(projs))
+}
+
 func TestCopyProjectIncremental(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()

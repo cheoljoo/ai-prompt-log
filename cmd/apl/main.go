@@ -52,7 +52,7 @@ func fail(format string, args ...any) {
 }
 
 func main() {
-	all := flag.Bool("all", false, "Browse every project (3-pane aggregate view)")
+	all := flag.Bool("all", false, "Browse every project (3-pane aggregate view); with --backup, back up every project instead of only the current one; with --save, save every project")
 	flag.BoolVar(all, "a", false, "shorthand for --all")
 	doBackup := flag.Bool("backup", false, "Copy session jsonl files into --backup-dir (default ~/ai-prompt-log.backup/), incrementally, and exit. Never deletes anything already in the backup.")
 	viewBackup := flag.Bool("view-backup", false, "Browse a previous --backup (3-pane aggregate view, rooted at --backup-dir)")
@@ -80,11 +80,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "`apl --all` shows every project at once (3 panes: Projects | Prompts | Detail).\n\n")
 		fmt.Fprintf(os.Stderr, "`apl --backup` copies session logs into a durable backup directory (outside\n")
 		fmt.Fprintf(os.Stderr, "live directories, so it survives a project directory being deleted).\n")
+		fmt.Fprintf(os.Stderr, "Without --all, backs up only the current project; `apl --backup --all` backs up every project.\n")
 		fmt.Fprintf(os.Stderr, "`apl --view-backup` browses that backup with the same 3-pane view.\n\n")
 		fmt.Fprintf(os.Stderr, "`apl --save` writes the current view (respecting --all/--source/--since/--days)\n")
 		fmt.Fprintf(os.Stderr, "to a JSON file (start/end time, user prompt, final result, modified files per prompt) and exits.\n")
 		fmt.Fprintf(os.Stderr, "Without --save-file, always writes to apl-save.json in the current directory (overwritten each run).\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: apl [-a|--all | --backup | --view-backup | --save] [--depth N] [--backup-dir PATH]\n")
+		fmt.Fprintf(os.Stderr, "Usage: apl [-a|--all] [--backup | --view-backup | --save] [--depth N] [--backup-dir PATH]\n")
 		fmt.Fprintf(os.Stderr, "           [--save-file PATH] [--since YYYY-MM-DD | --days N]\n")
 		fmt.Fprintf(os.Stderr, "           [-s|--source {all,claude,agy,gemini,opencode,copilot} | --agy | --claude | --gemini | --opencode | --copilot]\n\n")
 		flag.PrintDefaults()
@@ -121,19 +122,25 @@ func main() {
 	}
 
 	modeCount := 0
-	for _, v := range []bool{*all, *doBackup, *viewBackup} {
+	for _, v := range []bool{*doBackup, *viewBackup} {
 		if v {
 			modeCount++
 		}
 	}
 	if modeCount > 1 {
-		fail("--all, --backup, and --view-backup are mutually exclusive")
+		fail("--backup and --view-backup are mutually exclusive")
+	}
+	if *all && *viewBackup {
+		fail("--all is mutually exclusive with --view-backup (already an aggregate view)")
 	}
 	if *doSave && (*doBackup || *viewBackup) {
 		fail("--save is mutually exclusive with --backup and --view-backup")
 	}
 	if depthGiven && !*doBackup {
 		fail("--depth only makes sense with --backup")
+	}
+	if depthGiven && *all {
+		fail("--depth is mutually exclusive with --all (--all backs up every project regardless of cwd)")
 	}
 	if *backupDir != "" && !(*doBackup || *viewBackup) {
 		fail("--backup-dir only makes sense with --backup or --view-backup")
@@ -160,14 +167,19 @@ func main() {
 	}
 
 	if *doBackup {
-		var depthPtr *int
-		if depthGiven {
-			depthPtr = depth
+		var stats backup.Stats
+		if *all {
+			stats = backup.RunAllWithFilter(dir, sourceFilter)
+		} else {
+			var depthPtr *int
+			if depthGiven {
+				depthPtr = depth
+			}
+			stats = backup.RunWithFilter(cwd, depthPtr, dir, sourceFilter)
 		}
-		stats := backup.RunWithFilter(cwd, depthPtr, dir, sourceFilter)
 		fmt.Println(backup.FormatSummary(stats, dir))
 		if stats.Projects == 0 {
-			fmt.Fprintln(os.Stderr, "no matching project found for this directory")
+			fmt.Fprintln(os.Stderr, "no matching project found")
 		}
 		return
 	}

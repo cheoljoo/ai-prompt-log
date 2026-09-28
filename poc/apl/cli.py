@@ -49,8 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
             "at once (3 panes: Projects | Prompts | Detail).\n\n"
             "`apl --backup` copies session logs into a durable backup "
             "directory (outside live directories, so it survives a "
-            "project directory being deleted). `apl --view-backup` browses "
-            "that backup with the same 3-pane view.\n\n"
+            "project directory being deleted). Without --all, backs up "
+            "only the current project; `apl --backup --all` backs up "
+            "every project. `apl --view-backup` browses that backup with "
+            "the same 3-pane view.\n\n"
             "`apl --save` writes the current view (respecting --all/"
             "--source/--since/--days) to a JSON file -- start/end time, "
             "user prompt, final result, and modified files per prompt -- "
@@ -69,12 +71,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
-        "-a",
-        "--all",
-        action="store_true",
-        help="Browse every project (3-pane aggregate view)",
-    )
-    mode.add_argument(
         "--backup",
         action="store_true",
         help=(
@@ -87,6 +83,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--view-backup",
         action="store_true",
         help="Browse a previous --backup (3-pane aggregate view, rooted at --backup-dir)",
+    )
+    parser.add_argument(
+        "-a",
+        "--all",
+        action="store_true",
+        help=(
+            "Browse every project (3-pane aggregate view); with --backup, "
+            "back up every project instead of only the current one; with "
+            "--save, save every project"
+        ),
     )
     parser.add_argument(
         "--depth",
@@ -187,8 +193,14 @@ def main() -> None:
 
     if args.depth is not None and not args.backup:
         parser.error("--depth only makes sense with --backup")
+    if args.depth is not None and args.all:
+        parser.error(
+            "--depth is mutually exclusive with --all (--all backs up every project regardless of cwd)"
+        )
     if args.backup_dir is not None and not (args.backup or args.view_backup):
         parser.error("--backup-dir only makes sense with --backup or --view-backup")
+    if args.all and args.view_backup:
+        parser.error("--all is mutually exclusive with --view-backup (already an aggregate view)")
     if args.save and (args.backup or args.view_backup):
         parser.error("--save is mutually exclusive with --backup and --view-backup")
     if args.save_file is not None and not args.save:
@@ -214,13 +226,16 @@ def main() -> None:
     backup_dir = args.backup_dir or backup_mod.DEFAULT_BACKUP_DIR
 
     if args.backup:
-        stats = backup_mod.run_backup(
-            Path.cwd(), args.depth, backup_dir, source_filter=source_filter
-        )
+        if args.all:
+            stats = backup_mod.run_backup_all(backup_dir, source_filter=source_filter)
+        else:
+            stats = backup_mod.run_backup(
+                Path.cwd(), args.depth, backup_dir, source_filter=source_filter
+            )
         print(backup_mod.format_summary(stats, backup_dir))
         if stats.projects == 0:
             print(
-                "no matching project found for this directory",
+                "no matching project found",
                 file=sys.stderr,
             )
         return
