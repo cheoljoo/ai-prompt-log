@@ -8,6 +8,12 @@
 Moving the cursor (j/k) in a list pane immediately updates the pane(s) to
 its right, mirroring tig's split "main + diff" view rather than requiring
 Enter to drill in. Enter/l still exist for moving keyboard focus rightward.
+
+Search (vi-style, over the Prompts list):
+  /keyword   search User Prompt OR Final Result text
+  <keyword   search User Prompt text only
+  >keyword   search Final Result text only
+  n / p      jump to next / previous match (wraps around)
 """
 from __future__ import annotations
 
@@ -17,14 +23,21 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.widgets import DataTable, Footer, Header, Input, Static
 
 from . import model, source
 
 MAX_TOOL_ARGS_SHOWN = 4
 MAX_TOOL_VALUE_LEN = 160
+
+SEARCH_PREFIX = {"both": "/", "user": "<", "final": ">"}
+SEARCH_LABEL = {
+    "both": "Search (User Prompt + Final Result)",
+    "user": "Search (User Prompt only)",
+    "final": "Search (Final Result only)",
+}
 
 
 def escape(text: str) -> str:
@@ -95,7 +108,47 @@ def _final_result_text(prompt: model.Prompt) -> str:
     return "\n\n".join(reversed(texts))
 
 
-def format_prompt_detail(prompt: model.Prompt) -> str:
+def _highlight(text: str, term: str) -> str:
+    """Escape `text` for Textual markup, wrapping every case-insensitive
+    occurrence of `term` in reverse-video so search matches stand out."""
+    if not term:
+        return escape(text)
+    lower_text = text.lower()
+    lower_term = term.lower()
+    tlen = len(term)
+    parts = []
+    start = 0
+    idx = lower_text.find(lower_term, start)
+    if idx == -1:
+        return escape(text)
+    while idx != -1:
+        parts.append(escape(text[start:idx]))
+        parts.append(
+            f"[reverse bold yellow]{escape(text[idx : idx + tlen])}[/reverse bold yellow]"
+        )
+        start = idx + tlen
+        idx = lower_text.find(lower_term, start)
+    parts.append(escape(text[start:]))
+    return "".join(parts)
+
+
+def prompt_matches_search(prompt: model.Prompt, term: str, mode: str) -> bool:
+    """True if `prompt` contains `term` (case-insensitive) in the field(s)
+    selected by `mode`: "user" (User Prompt text only), "final" (Final
+    Result text only), or "both" (either field)."""
+    if not term:
+        return False
+    term_l = term.lower()
+    if mode in ("both", "user") and term_l in (prompt.user_text or "").lower():
+        return True
+    if mode in ("both", "final") and term_l in _final_result_text(prompt).lower():
+        return True
+    return False
+
+
+def format_prompt_detail(
+    prompt: model.Prompt, search_term: str = "", search_mode: str = "both"
+) -> str:
     """Human-readable, indented rendering of one prompt + its AI result.
 
     Ordered USER -> FINAL-RESULT -> ASSISTANT (not USER -> ASSISTANT) so the
@@ -103,6 +156,9 @@ def format_prompt_detail(prompt: model.Prompt) -> str:
     tool-by-tool trace available below only if needed -- the final result
     text is deliberately repeated at the end of ASSISTANT too, in its
     original place in the trace.
+
+    If `search_term` is set, occurrences of it are highlighted within the
+    User Prompt and/or Final Result text according to `search_mode`.
 
     Returns a Textual/Rich markup *string* (not a Text/renderable object) —
     passing raw Rich renderables to Static crashes on this Textual version
@@ -119,17 +175,29 @@ def format_prompt_detail(prompt: model.Prompt) -> str:
     if prompt.sidechain:
         meta.append(f"[yellow]{escape('[subagent]')}[/yellow]")
 
+    user_text = prompt.user_text or ""
+    user_rendered = (
+        _highlight(user_text, search_term)
+        if search_mode in ("both", "user")
+        else escape(user_text)
+    )
+
     lines = [
         f"[reverse bold cyan] USER [/reverse bold cyan] {'  '.join(meta)}",
-        escape(prompt.user_text or ""),
+        user_rendered,
         "",
     ]
 
     final_result = _final_result_text(prompt)
     if final_result:
+        final_rendered = (
+            _highlight(final_result, search_term)
+            if search_mode in ("both", "final")
+            else escape(final_result)
+        )
         lines.append("[reverse bold blue] FINAL-RESULT [/reverse bold blue]")
         lines.append("")
-        lines.append(escape(final_result))
+        lines.append(final_rendered)
         lines.append("")
 
     file_changes = prompt.file_changes
@@ -175,12 +243,21 @@ class DetailPane(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Static("", id="detail-static")
 
-    def show(self, prompt: model.Prompt | None) -> None:
+    def show(
+        self,
+        prompt: model.Prompt | None,
+        search_term: str = "",
+        search_mode: str = "both",
+    ) -> None:
         static = self.query_one("#detail-static", Static)
         if prompt is None:
             static.update("[dim](no prompt selected)[/dim]")
         else:
-            static.update(format_prompt_detail(prompt))
+            static.update(
+                format_prompt_detail(
+                    prompt, search_term=search_term, search_mode=search_mode
+                )
+            )
         self.scroll_home(animate=False)
 
 
@@ -197,6 +274,11 @@ class AplScreen(Screen):
         Binding("ctrl+d", "half_page_down", "½ page down", key_display="^D"),
         Binding("ctrl+u", "half_page_up", "½ page up", key_display="^U"),
         Binding("ctrl+l", "reload", "Reload", key_display="^L"),
+        Binding("/", "start_search_both", "Search", key_display="/"),
+        Binding("<", "start_search_user", "Search USER", key_display="<"),
+        Binding(">", "start_search_final", "Search RESULT", key_display=">"),
+        Binding("n", "search_next", "Next match", key_display="n"),
+        Binding("p", "search_prev", "Prev match", key_display="p"),
     ]
 
     CHANGE_CHECK_INTERVAL_SECONDS = 30
@@ -211,6 +293,10 @@ class AplScreen(Screen):
         self._current_project: model.Project | None = None
         self._current_mtimes: dict = {}
         self._changes_pending = False
+        self._search_term = ""
+        self._search_mode = "both"
+        self._search_matches: list[int] = []
+        self._pending_search_mode = "both"
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -219,6 +305,12 @@ class AplScreen(Screen):
                 yield DataTable(id="projects-table", classes="pane")
             yield DataTable(id="prompts-table", classes="pane")
             yield DetailPane(id="detail-pane", classes="pane")
+        with Container(id="search-overlay"):
+            with Container(id="search-box"):
+                yield Static("Search", id="search-title")
+                with Horizontal(id="search-row"):
+                    yield Static("/", id="search-prefix")
+                    yield Input(id="search-input", placeholder="type keyword, Enter to search…")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -232,6 +324,7 @@ class AplScreen(Screen):
         prompts_table.add_column("Summary")
         prompts_table.border_title = "Prompts"
         self.query_one("#detail-pane", DetailPane).border_title = "Detail"
+        self.query_one("#search-overlay").display = False
 
         if self.mode == "aggregate":
             projects_table = self.query_one("#projects-table", DataTable)
@@ -307,6 +400,8 @@ class AplScreen(Screen):
         table = self.query_one("#prompts-table", DataTable)
         table.border_subtitle = ""
         self._changes_pending = False
+        self._search_term = ""
+        self._search_matches = []
         self._current_project = project
         self._current_mtimes = self._snapshot_mtimes(project)
         table.clear()
@@ -344,7 +439,11 @@ class AplScreen(Screen):
         if self.mode == "aggregate" and event.data_table.id == "projects-table":
             self._load_prompts_for(self._projects[int(row_key)])
         elif event.data_table.id == "prompts-table" and self._current_prompts:
-            self.query_one("#detail-pane", DetailPane).show(self._current_prompts[int(row_key)])
+            self.query_one("#detail-pane", DetailPane).show(
+                self._current_prompts[int(row_key)],
+                search_term=self._search_term,
+                search_mode=self._search_mode,
+            )
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         # DataTable claims "enter" for itself (action_select_cursor) before it
@@ -412,7 +511,96 @@ class AplScreen(Screen):
         self.focus_next()
 
     def action_focus_prev_pane(self) -> None:
+        if self.query_one("#search-overlay").display:
+            self._cancel_search()
+            return
         self.focus_previous()
+
+    # -- search ---------------------------------------------------------
+
+    def _begin_search(self, mode: str) -> None:
+        self._pending_search_mode = mode
+        self.query_one("#search-title", Static).update(SEARCH_LABEL[mode])
+        self.query_one("#search-prefix", Static).update(SEARCH_PREFIX[mode])
+        overlay = self.query_one("#search-overlay")
+        overlay.display = True
+        inp = self.query_one("#search-input", Input)
+        inp.value = ""
+        inp.focus()
+
+    def action_start_search_both(self) -> None:
+        self._begin_search("both")
+
+    def action_start_search_user(self) -> None:
+        self._begin_search("user")
+
+    def action_start_search_final(self) -> None:
+        self._begin_search("final")
+
+    def _cancel_search(self) -> None:
+        self.query_one("#search-overlay").display = False
+        table = self.query_one("#prompts-table", DataTable)
+        table.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "search-input":
+            return
+        self._cancel_search()
+        term = event.value.strip()
+        if not term:
+            # Empty search clears any active search/highlighting.
+            self._search_term = ""
+            self._search_matches = []
+            self.query_one("#prompts-table", DataTable).border_subtitle = ""
+            if self._current_prompts:
+                table = self.query_one("#prompts-table", DataTable)
+                self.query_one("#detail-pane", DetailPane).show(
+                    self._current_prompts[table.cursor_row]
+                )
+            return
+
+        self._search_term = term
+        self._search_mode = self._pending_search_mode
+        self._search_matches = [
+            i
+            for i, p in enumerate(self._current_prompts)
+            if prompt_matches_search(p, self._search_term, self._search_mode)
+        ]
+        if self._search_matches:
+            self.action_search_next()
+        else:
+            prefix = SEARCH_PREFIX[self._search_mode]
+            self.query_one("#prompts-table", DataTable).border_subtitle = (
+                f"{prefix}{term}  (no matches)"
+            )
+            self.notify(f"'{term}': 검색 결과 없음", title="apl", timeout=2)
+
+    def _jump_to_search_match(self, target: int) -> None:
+        table = self.query_one("#prompts-table", DataTable)
+        table.move_cursor(row=target)
+        pos = self._search_matches.index(target) + 1
+        prefix = SEARCH_PREFIX[self._search_mode]
+        table.border_subtitle = (
+            f"{prefix}{self._search_term}  ({pos}/{len(self._search_matches)})"
+        )
+
+    def action_search_next(self) -> None:
+        if not self._search_term or not self._search_matches:
+            return
+        table = self.query_one("#prompts-table", DataTable)
+        cur = table.cursor_row
+        later = [i for i in self._search_matches if i > cur]
+        target = later[0] if later else self._search_matches[0]
+        self._jump_to_search_match(target)
+
+    def action_search_prev(self) -> None:
+        if not self._search_term or not self._search_matches:
+            return
+        table = self.query_one("#prompts-table", DataTable)
+        cur = table.cursor_row
+        earlier = [i for i in self._search_matches if i < cur]
+        target = earlier[-1] if earlier else self._search_matches[-1]
+        self._jump_to_search_match(target)
 
 
 class AplApp(App):
@@ -428,6 +616,7 @@ class AplApp(App):
     CSS = """
     Screen {
         background: $surface;
+        layers: base overlay;
     }
     .pane {
         border: round $panel;
@@ -443,6 +632,56 @@ class AplApp(App):
     }
     #detail-pane {
         width: 1fr;
+    }
+    #search-overlay {
+        layer: overlay;
+        width: 100%;
+        height: 100%;
+        align: center middle;
+        display: none;
+    }
+    #search-box {
+        width: 70%;
+        max-width: 90;
+        height: 7;
+        background: black;
+        border: thick yellow;
+        padding: 1 2;
+    }
+    #search-title {
+        text-style: bold;
+        color: yellow;
+        margin-bottom: 1;
+    }
+    #search-prefix {
+        width: 3;
+        content-align: center middle;
+        text-style: bold;
+        color: yellow;
+    }
+    #search-input {
+        width: 1fr;
+        height: 1;
+        border: none;
+        padding: 0 1;
+        background: black;
+        color: white;
+        text-style: bold;
+    }
+    #search-input:focus {
+        border: none;
+        background: black;
+        color: white;
+        text-style: bold;
+    }
+    #search-input > .input--cursor {
+        background: yellow;
+        color: black;
+    }
+    #search-input > .input--placeholder {
+        background: black;
+        color: grey;
+        text-style: italic;
     }
     """
 

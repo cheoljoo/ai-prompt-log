@@ -21,7 +21,11 @@ Keybindings (vi-style):
   Ctrl+F/Ctrl+B/Space  page down / up
   Ctrl+D/Ctrl+U    half page down / up
   l, Tab, Enter    focus next pane (drill in)
-  h, Shift+Tab, Esc  focus previous pane (back)
+  h, Shift+Tab, Esc  focus previous pane (back) / cancel search
+  /keyword         search User Prompt OR Final Result (Enter to jump)
+  <keyword         search User Prompt only
+  >keyword         search Final Result only
+  n / p            next / previous search match
   F1               command palette (theme, screenshot, quit, ...)
   q                quit
 """
