@@ -1,8 +1,8 @@
-# apl — AI Prompt Log viewer for Claude Code, Antigravity CLI (agy) & OpenCode
+# apl — AI Prompt Log viewer for Claude Code, Antigravity CLI (agy), OpenCode & GitHub Copilot CLI
 
-A `tig`-style terminal viewer for [**Claude Code**](https://claude.com/claude-code), [**Antigravity CLI**](https://github.com/google-deepmind) (`agy` / Gemini), and [**OpenCode**](https://opencode.ai) session logs. `apl` reads local session logs directly (`~/.claude/projects/`, `~/.gemini/antigravity-cli/`, and `~/.local/share/opencode/`) — no separate logging daemon, no manual database setup, no API keys, nothing to configure.
+A `tig`-style terminal viewer for [**Claude Code**](https://claude.com/claude-code), [**Antigravity CLI**](https://github.com/google-deepmind) (`agy` / Gemini), [**OpenCode**](https://opencode.ai), and [**GitHub Copilot CLI**](https://github.com/github/copilot-cli) session logs. `apl` reads local session logs directly (`~/.claude/projects/`, `~/.gemini/antigravity-cli/`, `~/.local/share/opencode/`, and `~/.copilot/session-state/`) — no separate logging daemon, no manual database setup, no API keys, nothing to configure.
 
-> **Compatibility**: built for Claude Code's local session logs (`~/.claude/projects/**/*.jsonl`), Antigravity CLI (`~/.gemini/antigravity-cli/brain/**/transcript.jsonl` + `~/.gemini/tmp/`), and OpenCode (`~/.local/share/opencode/opencode.db`), verified against real logs (see [`docs/data-model.md`](docs/data-model.md)). This is an independent, unofficial tool.
+> **Compatibility**: built for Claude Code's local session logs (`~/.claude/projects/**/*.jsonl`), Antigravity CLI (`~/.gemini/antigravity-cli/brain/**/transcript.jsonl` + `~/.gemini/tmp/`), OpenCode (`~/.local/share/opencode/opencode.db`), and GitHub Copilot CLI (`~/.copilot/session-state/**/events.jsonl`), verified against real logs (see [`docs/data-model.md`](docs/data-model.md)). This is an independent, unofficial tool.
 
 ```
 apl               # this project's own prompts only   -> 2 panes: Prompts | Detail
@@ -10,6 +10,7 @@ apl --all         # every project you've used         -> 3 panes: Projects | Pro
 apl --opencode    # view only OpenCode prompts
 apl --agy         # view only Antigravity CLI (agy) prompts
 apl --claude      # view only Claude Code prompts
+apl --copilot     # view only GitHub Copilot CLI prompts
 apl --backup      # copy session logs to a durable backup dir (survives deleting the project)
 apl --view-backup # browse that backup                -> 3 panes, same as --all
 ```
@@ -60,16 +61,17 @@ This puts `apl` on your `PATH` (via `uv`'s tool bin directory). Since it's an ed
 
 ```sh
 cd ~/code/some-project
-apl              # browse this project's prompts (Claude Code, AGY, OpenCode)
+apl              # browse this project's prompts (Claude Code, AGY, OpenCode, Copilot CLI)
 apl --opencode   # browse only OpenCode prompts
 apl --agy        # browse only Antigravity CLI (agy) prompts
 apl --claude     # browse only Claude Code prompts
+apl --copilot    # browse only GitHub Copilot CLI prompts
 
 apl --all        # browse every project across sources (3 panes)
 apl --all --opencode # browse all projects with OpenCode sessions only
 apl --help       # usage, keybindings, this repo's URL
 
-apl --backup                  # back up current project (Claude + AGY + OpenCode)
+apl --backup                  # back up current project (Claude + AGY + OpenCode + Copilot CLI)
 apl --backup --depth 1        # + every sibling project under the parent directory
 apl --backup --backup-dir PATH  # use a custom backup location (default: ~/ai-prompt-log.backup/)
 apl --view-backup              # browse a previous --backup (3 panes, like --all)

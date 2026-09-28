@@ -188,6 +188,55 @@ func CopyProject(proj model.Project, destRoot string) (copied, updated, unchange
 			} else {
 				copied++
 			}
+		} else if fmtType == "copilot" {
+			// Every session's transcript is named events.jsonl, so
+			// (unlike agy's stem-based lookup) the session uuid is derived
+			// from the parent directory, matching source.ScanCopilotSessions.
+			convID := filepath.Base(filepath.Dir(f))
+			destF := filepath.Join(destDir, fmt.Sprintf("copilot-%s.jsonl", convID))
+			srcInfo, err := os.Stat(f)
+			if err != nil {
+				continue
+			}
+			destInfo, destErr := os.Stat(destF)
+			existed := destErr == nil
+			if existed && !destInfo.ModTime().Before(srcInfo.ModTime()) {
+				unchanged++
+				continue
+			}
+			if err := os.MkdirAll(destDir, 0o755); err != nil {
+				continue
+			}
+
+			branch := ""
+			if meta, ok := proj.ConvMetadata[convID]; ok && meta["branch"] != "" {
+				branch = meta["branch"]
+			}
+			metaHeader := fmt.Sprintf(
+				`{"type":"copilot_metadata","cwd":%q,"sessionId":%q,"gitBranch":%q}`+"\n",
+				proj.Cwd, convID, branch,
+			)
+
+			in, err := os.Open(f)
+			if err != nil {
+				continue
+			}
+			out, err := os.Create(destF)
+			if err != nil {
+				in.Close()
+				continue
+			}
+			_, _ = out.WriteString(metaHeader)
+			_, _ = io.Copy(out, in)
+			in.Close()
+			out.Close()
+			_ = os.Chtimes(destF, srcInfo.ModTime(), srcInfo.ModTime())
+
+			if existed {
+				updated++
+			} else {
+				copied++
+			}
 		} else if fmtType == "opencode" {
 			convID := stem
 			if meta, ok := proj.ConvMetadata[stem]; ok && meta["id"] != "" {

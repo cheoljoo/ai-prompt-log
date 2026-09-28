@@ -39,9 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
         prog="apl",
         description=(
             "apl (AI Prompt Log viewer) - a tig-style TUI for browsing "
-            "Claude Code, Antigravity CLI (agy / gemini), and OpenCode "
-            "session logs, read directly from ~/.claude/projects, "
-            "~/.gemini/antigravity-cli, and ~/.local/share/opencode "
+            "Claude Code, Antigravity CLI (agy / gemini), OpenCode, and "
+            "GitHub Copilot CLI session logs, read directly from "
+            "~/.claude/projects, ~/.gemini/antigravity-cli, "
+            "~/.local/share/opencode, and ~/.copilot/session-state "
             "(no copying).\n\n"
             "Plain `apl` shows just the current project's own prompts "
             "(2 panes: Prompts | Detail). `apl --all` shows every project "
@@ -104,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     source_grp.add_argument(
         "-s",
         "--source",
-        choices=["all", "claude", "agy", "gemini", "opencode"],
+        choices=["all", "claude", "agy", "gemini", "opencode", "copilot"],
         default=None,
         help="AI assistant log source to display (default: all available)",
     )
@@ -128,6 +129,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Display only OpenCode logs",
     )
+    source_grp.add_argument(
+        "--copilot",
+        action="store_true",
+        help="Display only GitHub Copilot CLI logs",
+    )
 
     return parser
 
@@ -147,6 +153,8 @@ def main() -> None:
         source_filter = "claude"
     elif args.opencode:
         source_filter = "opencode"
+    elif args.copilot:
+        source_filter = "copilot"
     elif args.source:
         source_filter = "agy" if args.source == "gemini" else args.source
     else:

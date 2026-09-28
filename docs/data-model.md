@@ -129,6 +129,9 @@ OpenCode 세션 로그도 Claude Code, AGY와 동일하게 탐색, 뷰, 백업�
   - `edit`: `filePath` -> `oldString`이 존재하면 `modified`, 없으면 `created`
 - **Gemini CLI**:
   - `write_file`: `file_path` -> `created`
+- **GitHub Copilot CLI**:
+  - `create`: `path` -> `created`
+  - `edit`: `path` -> `modified`
 - **쉘 명령 (Bash / run_command / bash)**:
   - `rm`, `rmdir` -> `deleted`
   - `touch`, `mkdir` -> `created`
@@ -139,3 +142,27 @@ OpenCode 세션 로그도 Claude Code, AGY와 동일하게 탐색, 뷰, 백업�
 - 동일 프롬프트 내에서 동일 파일에 대해 여러 작업이 일어날 경우:
   - 이전에 `created`된 파일에 대해 이후 `modified`가 발생해도 상태는 `created`를 유지한다.
   - 그 외의 경우 나중에 발생한 작업(`created`/`deleted`/`modified`)이 이전 상태를 갱신한다.
+
+## 11. GitHub Copilot CLI 규격
+
+GitHub Copilot CLI 세션 로그도 다른 소스와 동일하게 탐색, 뷰, 백업을 지원한다:
+
+### 11-1. 파일 위치 및 메타데이터
+- 세션 상태: `~/.copilot/session-state/<session-uuid>/`
+  - `workspace.yaml`: 플랫(flat) `key: value` 라인들 -- `id`(세션 uuid), `cwd`(작업 디렉터리), `branch`(git 브랜치), `name` 또는 `summary`(세션 제목/미리보기)
+  - `events.jsonl`: 세션의 전체 이벤트 로그(한 줄에 하나의 JSON 이벤트, `{"type":..., "data":..., "timestamp":...}` 형태)
+- 모든 세션의 트랜스크립트 파일명이 동일하게 `events.jsonl`이므로(AGY의 `transcript.jsonl`과 동일한 상황), 세션을 구분하려면 파일의 부모 디렉터리 이름(세션 uuid)을 사용해야 한다 -- `BuildPromptsForFiles`가 그 이름으로 메타데이터(`workspace.yaml`에서 읽은 값)를 조회한다.
+
+### 11-2. Prompt 경계 및 블록 판정
+- `type == "user.message"`: 사용자 프롬프트 시작. `data.content`가 사용자가 입력한 원문 텍스트(에이전트가 주입한 `<system_reminder>` 등은 `data.transformedContent`에만 있으므로 뷰어는 이를 읽지 않는다)
+- `type == "assistant.message"`: 어시스턴트 턴
+  - `data.content`: 비어있지 않으면 `text` 블록으로 변환
+  - `data.toolRequests` 배열: 각 항목의 `name`/`arguments`를 읽어 `tool_use` 블록으로 변환(Claude Code와 달리 도구 호출과 실행 결과가 별도의 `tool.execution_start`/`tool.execution_complete` 이벤트로도 기록되지만, 뷰어는 `assistant.message`의 `toolRequests`만으로 충분하므로 이 이벤트들은 무시한다)
+- 토큰 사용량: 모델 호출 성공 이벤트(`model.model_call_success`)의 토큰 정보가 세션 제목 생성 등 부가 호출에도 섞여 나와 프롬프트별로 신뢰성 있게 대응시키기 어려워 현재는 집계하지 않는다(`TotalTokens`는 0으로 남는다).
+
+### 11-3. 백업 포맷 (독립적 self-contained 저장)
+- Copilot CLI 세션 백업 시 `copilot-<session-uuid>.jsonl` 파일명의 첫 줄에 메타데이터 레코드 삽입:
+  ```json
+  {"type": "copilot_metadata", "cwd": "/path/to/project", "sessionId": "<session-uuid>", "gitBranch": "<branch>"}
+  ```
+- 이로써 `workspace.yaml`에 의존하지 않고도 백업 디렉터리(`apl --view-backup`)에서 프로젝트 경로 및 브랜치를 완벽하게 복원할 수 있다.

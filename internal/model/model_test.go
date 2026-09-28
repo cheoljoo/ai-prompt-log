@@ -50,6 +50,20 @@ func TestDetectFileFormat(t *testing.T) {
 	if got := DetectFileFormat(opencodeF); got != "opencode" {
 		t.Fatalf("detect opencode: expected 'opencode', got %q", got)
 	}
+
+	// 7. GitHub Copilot CLI
+	copilotF := filepath.Join(dir, "events.jsonl")
+	_ = os.WriteFile(copilotF, []byte(`{"type":"session.start","data":{"sessionId":"cop-1"},"timestamp":"2026-09-28T03:55:13.183Z"}`+"\n"), 0o644)
+	if got := DetectFileFormat(copilotF); got != "copilot" {
+		t.Fatalf("detect copilot: expected 'copilot', got %q", got)
+	}
+
+	// 8. GitHub Copilot CLI metadata (backup format)
+	copilotMetaF := filepath.Join(dir, "copilot_meta.jsonl")
+	_ = os.WriteFile(copilotMetaF, []byte(`{"type":"copilot_metadata","cwd":"/test/path","sessionId":"cop-1","gitBranch":"main"}`+"\n"), 0o644)
+	if got := DetectFileFormat(copilotMetaF); got != "copilot" {
+		t.Fatalf("detect copilot_metadata: expected 'copilot', got %q", got)
+	}
 }
 
 func TestParseClaude(t *testing.T) {
@@ -179,6 +193,45 @@ func TestParseOpenCode(t *testing.T) {
 	}
 }
 
+func TestParseCopilot(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "sess-uuid-1")
+	_ = os.MkdirAll(sessionDir, 0o755)
+	f := filepath.Join(sessionDir, "events.jsonl")
+	content := `{"type":"session.start","data":{"sessionId":"sess-uuid-1"},"timestamp":"2026-09-28T03:55:13.183Z"}` + "\n" +
+		`{"type":"user.message","data":{"content":"add copilot support"},"timestamp":"2026-09-28T03:55:49.761Z"}` + "\n" +
+		`{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"t1","name":"view","arguments":{"path":"/a"}}]},"timestamp":"2026-09-28T03:55:54.174Z"}` + "\n" +
+		`{"type":"assistant.message","data":{"content":"Done.","toolRequests":[]},"timestamp":"2026-09-28T03:55:55.000Z"}` + "\n"
+	_ = os.WriteFile(f, []byte(content), 0o644)
+
+	prompts := ParseCopilotEventsFile(f, "sess-uuid-1", "main")
+	if len(prompts) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(prompts))
+	}
+	p := prompts[0]
+	if p.Source != "copilot" {
+		t.Fatalf("expected source 'copilot', got %q", p.Source)
+	}
+	if p.UserText != "add copilot support" {
+		t.Fatalf("expected user text 'add copilot support', got %q", p.UserText)
+	}
+	if p.Branch != "main" {
+		t.Fatalf("expected branch 'main', got %q", p.Branch)
+	}
+	if p.SessionID != "sess-uuid-1" {
+		t.Fatalf("expected session ID 'sess-uuid-1', got %q", p.SessionID)
+	}
+	if len(p.Blocks) != 2 {
+		t.Fatalf("expected 2 blocks, got %d", len(p.Blocks))
+	}
+	if p.Blocks[0].Kind != "tool_use" || p.Blocks[0].ToolName != "view" {
+		t.Fatalf("unexpected block 0: %+v", p.Blocks[0])
+	}
+	if p.Blocks[1].Kind != "text" || p.Blocks[1].Text != "Done." {
+		t.Fatalf("unexpected block 1: %+v", p.Blocks[1])
+	}
+}
+
 func TestFileChanges(t *testing.T) {
 	// 1. Claude write and edit
 	p1 := Prompt{
@@ -282,5 +335,28 @@ func TestFileChanges(t *testing.T) {
 	fc6 := p6.FileChanges()
 	if len(fc6) != 1 || fc6[0] != (FileChange{Path: "out.py", Action: "created"}) {
 		t.Fatalf("unexpected fc6: %+v", fc6)
+	}
+
+	// 7. GitHub Copilot CLI create/edit/bash tools
+	p7 := Prompt{
+		Blocks: []AssistantBlock{
+			{Kind: "tool_use", ToolName: "create", ToolInput: []KV{{Key: "path", Value: "/a/new.py"}, {Key: "file_text", Value: "x"}}},
+			{Kind: "tool_use", ToolName: "edit", ToolInput: []KV{{Key: "path", Value: "/a/existing.py"}, {Key: "old_str", Value: "x"}, {Key: "new_str", Value: "y"}}},
+			{Kind: "tool_use", ToolName: "bash", ToolInput: []KV{{Key: "command", Value: "rm /tmp/gone.py"}}},
+		},
+	}
+	fc7 := p7.FileChanges()
+	expected7 := []FileChange{
+		{Path: "/a/new.py", Action: "created"},
+		{Path: "/a/existing.py", Action: "modified"},
+		{Path: "/tmp/gone.py", Action: "deleted"},
+	}
+	if len(fc7) != len(expected7) {
+		t.Fatalf("expected len %d, got %d: %+v", len(expected7), len(fc7), fc7)
+	}
+	for i, e := range expected7 {
+		if fc7[i] != e {
+			t.Fatalf("idx %d: expected %+v, got %+v", i, e, fc7[i])
+		}
 	}
 }

@@ -384,13 +384,19 @@ func ExtractFileChanges(p *Prompt) []FileChange {
 			if path := getToolInputString(block.ToolInput, "file_path"); path != "" {
 				raw = append(raw, FileChange{Path: path, Action: "created"})
 			}
-		case "edit": // OpenCode's edit tool
+		case "edit": // OpenCode's edit tool, or GitHub Copilot CLI's edit tool
 			if path := getToolInputString(block.ToolInput, "filePath"); path != "" {
 				action := "created"
 				if hasToolInputKey(block.ToolInput, "oldString") {
 					action = "modified"
 				}
 				raw = append(raw, FileChange{Path: path, Action: action})
+			} else if path := getToolInputString(block.ToolInput, "path"); path != "" {
+				raw = append(raw, FileChange{Path: path, Action: "modified"})
+			}
+		case "create": // GitHub Copilot CLI's create tool
+			if path := getToolInputString(block.ToolInput, "path"); path != "" {
+				raw = append(raw, FileChange{Path: path, Action: "created"})
 			}
 		case "Bash", "run_shell_command", "bash":
 			if cmd := getToolInputString(block.ToolInput, "command"); cmd != "" {
@@ -682,6 +688,12 @@ func DetectFileFormat(path string) string {
 		}
 		if rtype == "gemini_metadata" {
 			return "gemini_jsonl"
+		}
+		if rtype == "copilot_metadata" {
+			return "copilot"
+		}
+		if rtype == "session.start" || rtype == "user.message" || rtype == "assistant.message" {
+			return "copilot"
 		}
 		if rtype == "USER_INPUT" || rtype == "PLANNER_RESPONSE" || rtype == "LIST_DIRECTORY" || rtype == "VIEW_FILE" {
 			return "agy"
@@ -1063,6 +1075,120 @@ func ParseOpenCodeSessionFile(path string) []Prompt {
 	return prompts
 }
 
+type rawCopilotEvent struct {
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp"`
+	Data      json.RawMessage `json:"data"`
+}
+
+type rawCopilotMetadata struct {
+	Cwd       string `json:"cwd"`
+	SessionID string `json:"sessionId"`
+	GitBranch string `json:"gitBranch"`
+}
+
+type rawCopilotUserMessage struct {
+	Content string `json:"content"`
+}
+
+type rawCopilotToolRequest struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type rawCopilotAssistantMessage struct {
+	Content      string                  `json:"content"`
+	ToolRequests []rawCopilotToolRequest `json:"toolRequests"`
+}
+
+// ParseCopilotEventsFile returns the Prompts found in a GitHub Copilot CLI
+// session's events.jsonl. See docs/data-model.md §11.
+func ParseCopilotEventsFile(path string, sessionID, defaultBranch string) []Prompt {
+	var prompts []Prompt
+	var current *Prompt
+	sid := sessionID
+	branch := defaultBranch
+
+	f, err := os.Open(path)
+	if err != nil {
+		return prompts
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
+
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var rec rawCopilotEvent
+		if err := json.Unmarshal(line, &rec); err != nil {
+			continue
+		}
+
+		switch rec.Type {
+		case "copilot_metadata":
+			var meta rawCopilotMetadata
+			if json.Unmarshal(rec.Data, &meta) == nil {
+				if meta.GitBranch != "" {
+					branch = meta.GitBranch
+				}
+				if meta.SessionID != "" {
+					sid = meta.SessionID
+				}
+			}
+		case "user.message":
+			var um rawCopilotUserMessage
+			if json.Unmarshal(rec.Data, &um) != nil {
+				continue
+			}
+			prompts = append(prompts, Prompt{
+				SessionID: sid,
+				Timestamp: rec.Timestamp,
+				Branch:    branch,
+				UserText:  um.Content,
+				Source:    "copilot",
+			})
+			current = &prompts[len(prompts)-1]
+		case "assistant.message":
+			if current == nil {
+				continue
+			}
+			var am rawCopilotAssistantMessage
+			if json.Unmarshal(rec.Data, &am) != nil {
+				continue
+			}
+			if am.Content != "" {
+				current.Blocks = append(current.Blocks, AssistantBlock{Kind: "text", Text: am.Content})
+			}
+			for _, tr := range am.ToolRequests {
+				name := tr.Name
+				if name == "" {
+					name = "?"
+				}
+				kvs := cleanToolInput(tr.Arguments)
+				current.Blocks = append(current.Blocks, AssistantBlock{
+					Kind:      "tool_use",
+					ToolName:  name,
+					ToolInput: kvs,
+				})
+			}
+		}
+	}
+
+	if sid == "" {
+		sid = filepath.Base(filepath.Dir(path))
+	}
+	for i := range prompts {
+		if prompts[i].SessionID == "" {
+			prompts[i].SessionID = sid
+		}
+	}
+	return prompts
+}
+
 // ParseSessionFile returns the Prompts found in a session file according to detected format.
 func ParseSessionFile(path string, defaultBranch, sessionID string) []Prompt {
 	fmtType := DetectFileFormat(path)
@@ -1075,6 +1201,8 @@ func ParseSessionFile(path string, defaultBranch, sessionID string) []Prompt {
 		return ParseGeminiJsonFile(path)
 	case "gemini_jsonl":
 		return ParseGeminiJsonlFile(path)
+	case "copilot":
+		return ParseCopilotEventsFile(path, sessionID, defaultBranch)
 	default:
 		return ParseClaudeSessionFile(path)
 	}
@@ -1177,6 +1305,15 @@ func BuildPromptsForFiles(files []string, convMeta map[string]map[string]string)
 				if filepath.Base(pdir) == ".system_generated" {
 					convID := filepath.Base(filepath.Dir(pdir))
 					meta = convMeta[convID]
+				}
+			} else if filepath.Base(f) == "events.jsonl" {
+				// GitHub Copilot CLI: every session's transcript is named
+				// events.jsonl, so the stem can't disambiguate sessions --
+				// the parent directory is the session uuid instead.
+				convID := filepath.Base(dir)
+				meta = convMeta[convID]
+				if meta != nil {
+					stem = convID
 				}
 			}
 		}
@@ -1295,6 +1432,25 @@ func LoadProjectWithFilter(target, sourceFilter string) Project {
 		}
 	}
 
+	for _, c := range info.CopilotConvs {
+		if c.TranscriptPath != "" {
+			if _, err := os.Stat(c.TranscriptPath); err == nil {
+				allFiles = append(allFiles, c.TranscriptPath)
+				// Every Copilot CLI session file is named events.jsonl, so
+				// (unlike other sources) we don't also key metadata by the
+				// file stem -- BuildPromptsForFiles falls back to the
+				// session-uuid parent directory name instead (see there).
+				metadata[c.ID] = map[string]string{
+					"id":        c.ID,
+					"workspace": c.Workspace,
+					"branch":    c.Branch,
+					"title":     c.Title,
+				}
+				sourcesFound["copilot"] = true
+			}
+		}
+	}
+
 	var srcKeys []string
 	for k := range sourcesFound {
 		srcKeys = append(srcKeys, k)
@@ -1302,7 +1458,7 @@ func LoadProjectWithFilter(target, sourceFilter string) Project {
 	sort.Strings(srcKeys)
 	srcLabel := strings.Join(srcKeys, "+")
 	if srcLabel == "" {
-		if sourceFilter == "claude" || sourceFilter == "opencode" {
+		if sourceFilter == "claude" || sourceFilter == "opencode" || sourceFilter == "copilot" {
 			srcLabel = sourceFilter
 		} else {
 			srcLabel = "agy"
@@ -1368,10 +1524,11 @@ func LoadProjectsWithFilter(aggregateRoot, sourceFilter string) []Project {
 		return out
 	}
 
-	// 3. Global multi-source aggregate (Claude + AGY + Gemini + OpenCode)
+	// 3. Global multi-source aggregate (Claude + AGY + Gemini + OpenCode + Copilot)
 	includeClaude := sourceFilter == "all" || sourceFilter == "claude"
 	includeAgy := sourceFilter == "all" || sourceFilter == "agy" || sourceFilter == "gemini"
 	includeOpenCode := sourceFilter == "all" || sourceFilter == "opencode"
+	includeCopilot := sourceFilter == "all" || sourceFilter == "copilot"
 
 	type wsEntry struct {
 		cwd           string
@@ -1380,6 +1537,7 @@ func LoadProjectsWithFilter(aggregateRoot, sourceFilter string) []Project {
 		agyConvs      []source.AgyConvInfo
 		geminiFiles   []string
 		opencodeConvs []source.OpenCodeConvInfo
+		copilotConvs  []source.CopilotConvInfo
 		metadata      map[string]map[string]string
 	}
 	projectsByWS := make(map[string]*wsEntry)
@@ -1462,6 +1620,26 @@ func LoadProjectsWithFilter(aggregateRoot, sourceFilter string) []Project {
 		}
 	}
 
+	if includeCopilot {
+		for _, c := range source.ScanCopilotSessions("") {
+			ws := c.Workspace
+			if ws == "" {
+				ws = "copilot-" + c.ID
+				if len(ws) > 16 {
+					ws = ws[:16]
+				}
+			}
+			e := getOrCreate(ws)
+			e.copilotConvs = append(e.copilotConvs, c)
+			e.metadata[c.ID] = map[string]string{
+				"id":        c.ID,
+				"workspace": c.Workspace,
+				"branch":    c.Branch,
+				"title":     c.Title,
+			}
+		}
+	}
+
 	var sortedWS []string
 	for ws := range projectsByWS {
 		sortedWS = append(sortedWS, ws)
@@ -1497,6 +1675,15 @@ func LoadProjectsWithFilter(aggregateRoot, sourceFilter string) []Project {
 					tstem := strings.TrimSuffix(filepath.Base(c.TranscriptPath), filepath.Ext(c.TranscriptPath))
 					entry.metadata[tstem] = entry.metadata[c.ID]
 					sourcesFound["opencode"] = true
+				}
+			}
+		}
+		for _, c := range entry.copilotConvs {
+			if c.TranscriptPath != "" {
+				if _, err := os.Stat(c.TranscriptPath); err == nil {
+					allFiles = append(allFiles, c.TranscriptPath)
+					// No tstem key: see the comment in LoadProjectWithFilter.
+					sourcesFound["copilot"] = true
 				}
 			}
 		}

@@ -22,6 +22,9 @@ OPENCODE_DB_PATH = OPENCODE_DATA_DIR / "opencode.db"
 OPENCODE_CACHE_DIR = Path(
     os.environ.get("OPENCODE_CACHE_DIR") or (Path.home() / ".cache" / "ai-prompt-log" / "opencode")
 )
+COPILOT_STATE_DIR = Path(
+    os.environ.get("COPILOT_STATE_DIR") or (Path.home() / ".copilot" / "session-state")
+)
 
 
 def encode_path(path: Path) -> str:
@@ -366,6 +369,58 @@ def scan_opencode_conversations(
     return convs
 
 
+def _parse_flat_yaml(text: str) -> dict[str, str]:
+    """Parse workspace.yaml's flat `key: value` lines (no nested structures
+    in practice -- see docs/data-model.md). Not a general YAML parser:
+    block scalars, lists, and multi-line values are not supported."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        if ": " not in line:
+            continue
+        key, _, val = line.partition(": ")
+        key = key.strip()
+        if not key:
+            continue
+        out[key] = val.strip()
+    return out
+
+
+def get_copilot_conv_info(session_id: str, session_dir: Path) -> dict:
+    """Read workspace.yaml for one GitHub Copilot CLI session directory."""
+    info = {"id": session_id, "workspace": "", "branch": "", "title": ""}
+    yaml_path = session_dir / "workspace.yaml"
+    if not yaml_path.exists():
+        return info
+    try:
+        fields = _parse_flat_yaml(yaml_path.read_text(errors="ignore"))
+    except OSError:
+        return info
+    if fields.get("id"):
+        info["id"] = fields["id"]
+    info["workspace"] = fields.get("cwd", "")
+    info["branch"] = fields.get("branch", "")
+    info["title"] = fields.get("name") or fields.get("summary", "")
+    return info
+
+
+def scan_copilot_sessions(base: Path = COPILOT_STATE_DIR) -> list[dict]:
+    """Return all GitHub Copilot CLI sessions with their workspace, branch,
+    and events.jsonl transcript."""
+    convs = []
+    if not base.is_dir():
+        return convs
+    for session_dir in base.iterdir():
+        if not session_dir.is_dir():
+            continue
+        transcript = session_dir / "events.jsonl"
+        if not transcript.is_file():
+            continue
+        info = get_copilot_conv_info(session_dir.name, session_dir)
+        info["transcript"] = transcript
+        convs.append(info)
+    return convs
+
+
 def find_direct_project_dir(cwd: Path) -> Path:
     """Walk up from cwd to the nearest ancestor with recorded Claude sessions.
 
@@ -388,11 +443,13 @@ def find_direct_project_info(cwd: Path, source_filter: str = "all") -> dict:
     include_claude = source_filter in ("all", "claude")
     include_agy = source_filter in ("all", "agy", "gemini")
     include_opencode = source_filter in ("all", "opencode")
+    include_copilot = source_filter in ("all", "copilot")
 
     cur = cwd.resolve()
     all_agy = scan_agy_conversations() if include_agy else []
     all_gemini = scan_gemini_tmp_projects() if include_agy else []
     all_opencode = scan_opencode_conversations() if include_opencode else []
+    all_copilot = scan_copilot_sessions() if include_copilot else []
 
     for candidate in (cur, *cur.parents):
         cand_str = str(candidate)
@@ -423,7 +480,14 @@ def find_direct_project_info(cwd: Path, source_filter: str = "all") -> dict:
                 if c_ws and Path(c_ws).resolve() == candidate:
                     opencode_convs.append(c)
 
-        if claude_files or agy_convs or gemini_files or opencode_convs:
+        copilot_convs: list[dict] = []
+        if include_copilot:
+            for c in all_copilot:
+                c_ws = c.get("workspace", "")
+                if c_ws and Path(c_ws).resolve() == candidate:
+                    copilot_convs.append(c)
+
+        if claude_files or agy_convs or gemini_files or opencode_convs or copilot_convs:
             return {
                 "cwd": cand_str,
                 "display_name": candidate.name,
@@ -431,6 +495,7 @@ def find_direct_project_info(cwd: Path, source_filter: str = "all") -> dict:
                 "agy_convs": agy_convs,
                 "gemini_files": gemini_files,
                 "opencode_convs": opencode_convs,
+                "copilot_convs": copilot_convs,
                 "path": candidate,
             }
 
