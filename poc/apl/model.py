@@ -9,6 +9,7 @@ import json
 import re
 import shlex
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -690,12 +691,20 @@ def _format_ts_str(ts) -> str:
     if isinstance(ts, (int, float)):
         if ts > 100_000_000_000:
             ts = ts / 1000.0
-        from datetime import datetime, timezone
         return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
     return str(ts)
 
 
 def _session_start_timestamp(path: Path) -> str:
+    """Best-effort "when did this session file start" heuristic, used only
+    to pre-sort files before parsing (build_prompts_from_files() re-sorts
+    the final merged prompt list by each prompt's own timestamp, so this
+    doesn't need to be perfect -- but a candidate value that doesn't
+    actually parse as a timestamp (e.g. a UUID/session-id happening to sit
+    under a similarly-named field) must never be accepted, since it could
+    otherwise sort lexicographically after every real date string and
+    misorder file-level parsing/fallback-carry-forward for that file's
+    prompts with unparseable timestamps of their own."""
     try:
         with path.open("r", errors="ignore") as fh:
             first_chunk = fh.read(4096)
@@ -703,10 +712,11 @@ def _session_start_timestamp(path: Path) -> str:
                 try:
                     obj = json.loads(first_chunk)
                     if isinstance(obj, dict):
-                        if "startTime" in obj:
-                            return _format_ts_str(obj["startTime"])
-                        if "timestamp" in obj:
-                            return _format_ts_str(obj["timestamp"])
+                        for key in ("startTime", "timestamp"):
+                            if key in obj:
+                                candidate = _format_ts_str(obj[key])
+                                if parse_timestamp_loose(candidate) is not None:
+                                    return candidate
                 except Exception:
                     pass
             for line in first_chunk.splitlines():
@@ -715,14 +725,13 @@ def _session_start_timestamp(path: Path) -> str:
                     continue
                 try:
                     rec = json.loads(line)
-                    if rec.get("created_at"):
-                        return _format_ts_str(rec["created_at"])
-                    if rec.get("timestamp"):
-                        return _format_ts_str(rec["timestamp"])
-                    if rec.get("startTime"):
-                        return _format_ts_str(rec["startTime"])
                 except Exception:
                     continue
+                for key in ("created_at", "timestamp", "startTime"):
+                    if rec.get(key):
+                        candidate = _format_ts_str(rec[key])
+                        if parse_timestamp_loose(candidate) is not None:
+                            return candidate
     except Exception:
         pass
     return ""
@@ -731,9 +740,25 @@ def _session_start_timestamp(path: Path) -> str:
 def build_prompts_from_files(
     files: list[Path], conv_metadata: dict[str, dict] | None = None
 ) -> list[Prompt]:
-    """Merge given session files into one time-ordered list."""
+    """Merge given session files into one time-ordered list.
+
+    Files are pre-sorted by their own start timestamp (so parsing stays in
+    a sensible order), but the final list is then re-sorted by each
+    individual Prompt's own timestamp -- NOT just its file's -- because a
+    single long-lived session file (kept open/appended to over days) would
+    otherwise drag its entire block of prompts to wherever its *first*
+    prompt sorted, stranding unrelated short-lived files' prompts far from
+    where they chronologically belong (e.g. a quick one-off session from
+    days ago showing up above prompts made minutes ago, or vice versa).
+
+    The re-sort is stable and carries forward the last successfully-parsed
+    timestamp as a fallback for any prompt whose own timestamp can't be
+    parsed, so those stay adjacent to their neighbors (per docs/data-model.md
+    §6, intra-file line order is still trusted over raw timestamps at the
+    boundaries where compact-summary timestamps are known to regress).
+    """
     files_with_ts = sorted(files, key=_session_start_timestamp)
-    prompts: list[Prompt] = []
+    all_prompts: list[Prompt] = []
     conv_metadata = conv_metadata or {}
     for f in files_with_ts:
         # Match metadata by filename or conv_id
@@ -746,14 +771,25 @@ def build_prompts_from_files(
             # directory (the session uuid) instead, matching
             # source.scan_copilot_sessions().
             meta = conv_metadata.get(f.parent.name) or {}
-        prompts.extend(
+        all_prompts.extend(
             parse_session_file(
                 f,
                 default_branch=meta.get("branch", ""),
                 session_id=meta.get("id", f.stem),
             )
         )
-    return prompts
+
+    fallback = datetime.min.replace(tzinfo=timezone.utc)
+    keyed: list[tuple[datetime, int, Prompt]] = []
+    for idx, p in enumerate(all_prompts):
+        dt = parse_timestamp_loose(p.timestamp)
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            fallback = dt
+        keyed.append((fallback, idx, p))
+    keyed.sort(key=lambda item: (item[0], item[1]))
+    return [p for _, _, p in keyed]
 
 
 def build_prompts(project_dir: Path) -> list[Prompt]:
@@ -1061,8 +1097,6 @@ def parse_timestamp_loose(ts: str):
     doesn't match any known format."""
     if not ts:
         return None
-    from datetime import datetime
-
     normalized = ts.replace("Z", "+0000") if ts.endswith("Z") else ts
     for fmt in _TIMESTAMP_FORMATS:
         try:
@@ -1081,8 +1115,6 @@ def build_save_document(
     unparseable/missing timestamp are always kept, to avoid silently
     dropping data. since (if given) is also echoed back in the document for
     traceability."""
-    from datetime import datetime, timezone
-
     doc = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "source_filter": source_filter,

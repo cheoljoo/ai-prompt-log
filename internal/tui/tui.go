@@ -76,6 +76,18 @@ func recencyStyle(ts string) lipgloss.Style {
 	return styleDim
 }
 
+// displayTimestamp converts a stored (UTC) ISO8601 timestamp to the local
+// timezone for on-screen display. All storage, sorting, and comparison of
+// timestamps elsewhere in the codebase must stay in UTC; conversion to
+// local time should only ever happen here, at the point of display.
+func displayTimestamp(ts string) string {
+	t, ok := model.ParseTimestampLoose(ts)
+	if !ok {
+		return ts
+	}
+	return t.Local().Format("2006-01-02T15:04:05")
+}
+
 func truncateValue(s string) string {
 	runes := []rune(s)
 	if len(runes) <= maxToolValueLen {
@@ -183,7 +195,7 @@ func formatPromptDetailWithSearch(p model.Prompt, searchTerm, searchMode string)
 	case "copilot":
 		srcBadge = styleBrightMagenta.Render("[copilot]")
 	}
-	meta := []string{srcBadge, styleDim.Render(p.Timestamp)}
+	meta := []string{srcBadge, styleDim.Render(displayTimestamp(p.Timestamp))}
 	if p.Branch != "" {
 		meta = append(meta, styleMagenta.Render(p.Branch))
 	}
@@ -394,7 +406,7 @@ func (m *Model) setPromptsFrom(proj model.Project) {
 		} else if p.Sidechain {
 			tag = "[subagent]"
 		}
-		ts := p.Timestamp
+		ts := displayTimestamp(p.Timestamp)
 		if len(ts) > 19 {
 			ts = ts[:19]
 		}

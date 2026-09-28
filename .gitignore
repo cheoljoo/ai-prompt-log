@@ -236,3 +236,4 @@ secure_info.py
 
 # GoReleaser build output
 /dist/
+bin/

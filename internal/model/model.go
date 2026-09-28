@@ -1272,6 +1272,16 @@ func formatTimestamp(val interface{}) string {
 	}
 }
 
+// sessionStartTimestamp is a best-effort "when did this session file
+// start" heuristic, used only to pre-sort files before parsing
+// (BuildPromptsForFiles re-sorts the final merged prompt list by each
+// prompt's own timestamp, so this doesn't need to be perfect -- but a
+// candidate value that doesn't actually parse as a timestamp (e.g. a
+// UUID/session-id happening to sit under a similarly-named field) must
+// never be accepted, since it could otherwise sort lexicographically
+// after every real date string and misorder file-level parsing/fallback-
+// carry-forward for that file's prompts with unparseable timestamps of
+// their own).
 func sessionStartTimestamp(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1290,7 +1300,11 @@ func sessionStartTimestamp(path string) string {
 			} `json:"messages"`
 		}
 		if err := json.Unmarshal([]byte(trimmed), &doc); err == nil && len(doc.Messages) > 0 {
-			return formatTimestamp(doc.Messages[0].Timestamp)
+			if candidate := formatTimestamp(doc.Messages[0].Timestamp); candidate != "" {
+				if _, ok := ParseTimestampLoose(candidate); ok {
+					return candidate
+				}
+			}
 		}
 	}
 
@@ -1306,20 +1320,40 @@ func sessionStartTimestamp(path string) string {
 		if err := dec.Decode(&rec); err != nil {
 			continue
 		}
-		if ts, ok := rec["timestamp"]; ok && ts != nil && ts != "" {
-			return formatTimestamp(ts)
-		}
-		if ca, ok := rec["created_at"]; ok && ca != nil && ca != "" {
-			return formatTimestamp(ca)
-		}
-		if st, ok := rec["startTime"]; ok && st != nil && st != "" {
-			return formatTimestamp(st)
+		for _, key := range []string{"timestamp", "created_at", "startTime"} {
+			val, ok := rec[key]
+			if !ok || val == nil || val == "" {
+				continue
+			}
+			candidate := formatTimestamp(val)
+			if candidate == "" {
+				continue
+			}
+			if _, ok := ParseTimestampLoose(candidate); ok {
+				return candidate
+			}
 		}
 	}
 	return ""
 }
 
-// BuildPromptsForFiles merges the given session files into one time-ordered list.
+// BuildPromptsForFiles merges the given session files into one
+//
+// Files are pre-sorted by their own start timestamp (so parsing stays in
+// a sensible order), but the final list is then re-sorted by each
+// individual Prompt's own timestamp -- NOT just its file's -- because a
+// single long-lived session file (kept open/appended to over days) would
+// otherwise drag its entire block of prompts to wherever its *first*
+// prompt sorted, stranding unrelated short-lived files' prompts far from
+// where they chronologically belong (e.g. an old one-off "agy" session
+// from weeks ago showing up above prompts made minutes ago, or vice
+// versa).
+//
+// The re-sort is stable and carries forward the last successfully-parsed
+// timestamp as a fallback for any prompt whose own timestamp can't be
+// parsed, so those stay adjacent to their neighbors (per docs/data-model.md
+// §6, intra-file line order is still trusted over raw timestamps at the
+// boundaries where compact-summary timestamps are known to regress).
 func BuildPromptsForFiles(files []string, convMeta map[string]map[string]string) []Prompt {
 	timestamps := make([]string, len(files))
 	for i, f := range files {
@@ -1333,7 +1367,7 @@ func BuildPromptsForFiles(files []string, convMeta map[string]map[string]string)
 		return timestamps[order[i]] < timestamps[order[j]]
 	})
 
-	var prompts []Prompt
+	var allPrompts []Prompt
 	for _, idx := range order {
 		f := files[idx]
 		stem := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
@@ -1367,7 +1401,32 @@ func BuildPromptsForFiles(files []string, convMeta map[string]map[string]string)
 				sid = id
 			}
 		}
-		prompts = append(prompts, ParseSessionFile(f, branch, sid)...)
+		allPrompts = append(allPrompts, ParseSessionFile(f, branch, sid)...)
+	}
+
+	type keyedPrompt struct {
+		ts  time.Time
+		idx int
+		p   Prompt
+	}
+	keyed := make([]keyedPrompt, len(allPrompts))
+	fallback := time.Time{} // zero value sorts first, same as Python's datetime.min
+	for i, p := range allPrompts {
+		if t, ok := ParseTimestampLoose(p.Timestamp); ok {
+			fallback = t
+		}
+		keyed[i] = keyedPrompt{ts: fallback, idx: i, p: p}
+	}
+	sort.SliceStable(keyed, func(i, j int) bool {
+		if !keyed[i].ts.Equal(keyed[j].ts) {
+			return keyed[i].ts.Before(keyed[j].ts)
+		}
+		return keyed[i].idx < keyed[j].idx
+	})
+
+	prompts := make([]Prompt, len(keyed))
+	for i, kp := range keyed {
+		prompts[i] = kp.p
 	}
 	return prompts
 }
