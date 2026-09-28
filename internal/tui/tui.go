@@ -76,6 +76,57 @@ func recencyStyle(ts string) lipgloss.Style {
 	return styleDim
 }
 
+// parseISOTimestamp parses a stored (always-UTC) ISO8601 timestamp string,
+// as produced by every parser in internal/model (RFC3339, optionally with
+// fractional seconds). Returns ok=false for empty/unparseable strings.
+func parseISOTimestamp(ts string) (t time.Time, ok bool) {
+	if ts == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, ts); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// localTS renders a stored UTC timestamp in the system's local timezone,
+// "YYYY-MM-DDTHH:MM:SS" (19 chars, matching the previous raw-UTC slice
+// width) for compact table columns.
+//
+// All prompt/session timestamps are parsed/stored/sorted as UTC ("Z"-
+// suffixed ISO8601) -- see docs/data-model.md -- which is correct for
+// internal consistency, but was previously displayed as-is (just string-
+// sliced), so a prompt made at 13:51 KST showed up as "...T04:51:38" with
+// no timezone marker, easily misread as 4:51am local time. This converts
+// to local wall-clock time for display only; parsing, sorting, and --save
+// continue to use the raw UTC string.
+func localTS(ts string) string {
+	t, ok := parseISOTimestamp(ts)
+	if !ok {
+		if ts == "" {
+			return "-"
+		}
+		if len(ts) > 19 {
+			return ts[:19]
+		}
+		return ts
+	}
+	return t.Local().Format("2006-01-02T15:04:05")
+}
+
+// localTSFull is like localTS but keeps the UTC offset (e.g. "+09:00") so
+// it's self-evidently local time, not UTC -- used where there's room to
+// spare (the Detail pane's USER header), rather than a narrow table column.
+func localTSFull(ts string) string {
+	t, ok := parseISOTimestamp(ts)
+	if !ok {
+		return ts
+	}
+	return t.Local().Format(time.RFC3339)
+}
+
 func truncateValue(s string) string {
 	runes := []rune(s)
 	if len(runes) <= maxToolValueLen {
@@ -183,7 +234,7 @@ func formatPromptDetailWithSearch(p model.Prompt, searchTerm, searchMode string)
 	case "copilot":
 		srcBadge = styleBrightMagenta.Render("[copilot]")
 	}
-	meta := []string{srcBadge, styleDim.Render(p.Timestamp)}
+	meta := []string{srcBadge, styleDim.Render(localTSFull(p.Timestamp))}
 	if p.Branch != "" {
 		meta = append(meta, styleMagenta.Render(p.Branch))
 	}
@@ -353,7 +404,7 @@ func NewWithFilter(mode, rootDir, sourceFilter string) Model {
 		m.projects = model.LoadProjectsWithFilter(rootDir, sourceFilter)
 		rows := make([]table.Row, 0, len(m.projects))
 		for _, p := range m.projects {
-			rows = append(rows, table.Row{p.DisplayName, p.Source, fmt.Sprintf("%d", p.PromptCount), p.LastActivity})
+			rows = append(rows, table.Row{p.DisplayName, p.Source, fmt.Sprintf("%d", p.PromptCount), localTS(p.LastActivity)})
 		}
 		m.projectsTable.SetRows(rows)
 		m.focus = paneProjects
@@ -394,10 +445,7 @@ func (m *Model) setPromptsFrom(proj model.Project) {
 		} else if p.Sidechain {
 			tag = "[subagent]"
 		}
-		ts := p.Timestamp
-		if len(ts) > 19 {
-			ts = ts[:19]
-		}
+		ts := localTS(p.Timestamp)
 		rows = append(rows, table.Row{ts, p.Source, p.Branch, formatTokens(p.TotalTokens), tag, p.Summary()})
 	}
 	m.promptsTable.SetRows(rows)
@@ -470,7 +518,7 @@ func (m *Model) reload() {
 	if m.mode == "aggregate" {
 		rows := m.projectsTable.Rows()
 		if m.currentProjectIdx < len(rows) {
-			rows[m.currentProjectIdx] = table.Row{refreshed.DisplayName, refreshed.Source, fmt.Sprintf("%d", refreshed.PromptCount), refreshed.LastActivity}
+			rows[m.currentProjectIdx] = table.Row{refreshed.DisplayName, refreshed.Source, fmt.Sprintf("%d", refreshed.PromptCount), localTS(refreshed.LastActivity)}
 			m.projectsTable.SetRows(rows)
 		}
 	}

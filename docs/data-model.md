@@ -61,6 +61,13 @@ Prompt로 잡힌다** — `<task-notification>...<summary>...</summary>...</task
 - 세션 내부: **파일 내 줄 순서**를 신뢰(timestamp가 compact 경계에서 역전되는 사례 실측 확인됨)
 - 세션 간(여러 jsonl 병합 시): 각 세션의 첫 유효 레코드 `timestamp` 기준으로 세션을 정렬한 뒤, 세션 내부는 줄 순서 유지
 
+**표시 시간대**: 파싱/저장/정렬은 항상 원본 그대로(`Z` 접미사 UTC ISO8601 문자열)를 사용한다 —
+`--save` JSON 내보내기도 마찬가지로 UTC 그대로 기록한다. 다만 TUI 화면(Prompts/Projects 테이블,
+Detail 패널의 USER 헤더)에 **표시**할 때만 시스템 로컬 타임존으로 변환한다(Python:
+`tui._local_ts`/`_local_ts_full`, Go: `tui.localTS`/`localTSFull`). 예전에는 UTC 문자열을
+그대로 잘라서 보여줬는데(`Z` 표시조차 잘려나감), 이 때문에 KST 사용자가 실제로 13:51에 작업한
+프롬프트를 "04:51"로 보고 "새벽 4시에 일한 적 없다"고 혼동하는 문제가 있었다.
+
 ## 7. Project 단위(집계 모드)
 
 - 집계 모드에서 "한 프로젝트" = 캐시 디렉터리 아래 한 하위 디렉터리(= 원래 `~/.claude/projects/<encoded-cwd>/`와 동일 구조)
