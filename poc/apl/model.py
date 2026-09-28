@@ -33,13 +33,25 @@ class AssistantBlock:
 @dataclass
 class Prompt:
     session_id: str
-    timestamp: str
+    timestamp: str  # start time (first user message)
     branch: str
     sidechain: bool
     user_text: str
     blocks: list = field(default_factory=list)  # list[AssistantBlock]
     total_tokens: int = 0
     source: str = "claude"  # "claude" | "agy" | "gemini" | "opencode" | "copilot"
+    end_timestamp: str = ""  # end time (last assistant activity for this prompt)
+
+    @property
+    def final_result(self) -> str:
+        """The last assistant "text" block's content for this prompt -- i.e.
+        the final response text shown to the user, ignoring any
+        intermediate tool_use blocks. Empty if the assistant never produced
+        text (e.g. session cut short before a response)."""
+        for block in reversed(self.blocks):
+            if block.kind == "text":
+                return block.text
+        return ""
 
     @property
     def is_command(self) -> bool:
@@ -322,9 +334,11 @@ def parse_claude_session_file(path: Path) -> list[Prompt]:
     session_id = path.stem
     for rec in _iter_records(path):
         if _is_claude_prompt_boundary(rec):
+            ts = rec.get("timestamp", "")
             current = Prompt(
                 session_id=rec.get("sessionId", session_id),
-                timestamp=rec.get("timestamp", ""),
+                timestamp=ts,
+                end_timestamp=ts,
                 branch=rec.get("gitBranch") or "",
                 sidechain=bool(rec.get("isSidechain")),
                 user_text=rec.get("message", {}).get("content", ""),
@@ -334,6 +348,8 @@ def parse_claude_session_file(path: Path) -> list[Prompt]:
         elif rec.get("type") == "assistant" and current is not None:
             current.blocks.extend(_extract_assistant_blocks(rec))
             current.total_tokens += _usage_tokens(rec)
+            if rec.get("timestamp"):
+                current.end_timestamp = rec["timestamp"]
     return prompts
 
 
@@ -375,9 +391,11 @@ def parse_copilot_events_file(
 
         if rtype == "user.message":
             content = data.get("content", "")
+            ts = rec.get("timestamp", "")
             current = Prompt(
                 session_id=sid,
-                timestamp=rec.get("timestamp", ""),
+                timestamp=ts,
+                end_timestamp=ts,
                 branch=branch,
                 sidechain=False,
                 user_text=content,
@@ -396,6 +414,8 @@ def parse_copilot_events_file(
                 current.blocks.append(
                     AssistantBlock("tool_use", tool_name=name, tool_input=targs)
                 )
+            if rec.get("timestamp"):
+                current.end_timestamp = rec["timestamp"]
 
     if not sid:
         sid = path.parent.name
@@ -452,6 +472,7 @@ def parse_agy_transcript_file(
             current = Prompt(
                 session_id=sid,
                 timestamp=ts,
+                end_timestamp=ts,
                 branch=branch,
                 sidechain=False,
                 user_text=user_text,
@@ -469,6 +490,9 @@ def parse_agy_transcript_file(
             text = rec.get("content", "")
             if text:
                 current.blocks.append(AssistantBlock("text", text=text))
+            resp_ts = rec.get("created_at") or rec.get("timestamp")
+            if resp_ts:
+                current.end_timestamp = resp_ts
     return prompts
 
 
@@ -494,9 +518,11 @@ def parse_gemini_json_file(path: Path) -> list[Prompt]:
                 elif isinstance(c, str):
                     texts.append(c)
             user_text = "\n".join(texts)
+            ts = msg.get("timestamp", "")
             current = Prompt(
                 session_id=session_id,
-                timestamp=msg.get("timestamp", ""),
+                timestamp=ts,
+                end_timestamp=ts,
                 branch="",
                 sidechain=False,
                 user_text=user_text,
@@ -509,6 +535,8 @@ def parse_gemini_json_file(path: Path) -> list[Prompt]:
                 current.blocks.append(AssistantBlock("text", text=text))
             tokens = msg.get("tokens", {}).get("total", 0)
             current.total_tokens += tokens
+            if msg.get("timestamp"):
+                current.end_timestamp = msg["timestamp"]
     return prompts
 
 
@@ -534,9 +562,11 @@ def parse_gemini_jsonl_file(path: Path) -> list[Prompt]:
                         c.get("text", "") if isinstance(c, dict) else str(c)
                         for c in msg.get("content", [])
                     ]
+                    ts = msg.get("timestamp", "")
                     current = Prompt(
                         session_id=session_id,
-                        timestamp=msg.get("timestamp", ""),
+                        timestamp=ts,
+                        end_timestamp=ts,
                         branch="",
                         sidechain=False,
                         user_text="\n".join(texts),
@@ -549,6 +579,8 @@ def parse_gemini_jsonl_file(path: Path) -> list[Prompt]:
                         current.blocks.append(AssistantBlock("text", text=text))
                     tokens = msg.get("tokens", {}).get("total", 0)
                     current.total_tokens += tokens
+                    if msg.get("timestamp"):
+                        current.end_timestamp = msg["timestamp"]
             continue
 
         mtype = rec.get("type")
@@ -557,9 +589,11 @@ def parse_gemini_jsonl_file(path: Path) -> list[Prompt]:
                 c.get("text", "") if isinstance(c, dict) else str(c)
                 for c in rec.get("content", [])
             ]
+            ts = rec.get("timestamp", "")
             current = Prompt(
                 session_id=rec.get("id", session_id),
-                timestamp=rec.get("timestamp", ""),
+                timestamp=ts,
+                end_timestamp=ts,
                 branch="",
                 sidechain=False,
                 user_text="\n".join(texts),
@@ -572,6 +606,8 @@ def parse_gemini_jsonl_file(path: Path) -> list[Prompt]:
                 current.blocks.append(AssistantBlock("text", text=text))
             tokens = rec.get("tokens", {}).get("total", 0)
             current.total_tokens += tokens
+            if rec.get("timestamp"):
+                current.end_timestamp = rec["timestamp"]
     return prompts
 
 
@@ -1006,3 +1042,90 @@ def load_projects(
     project_list.sort(key=lambda p: p.last_activity, reverse=True)
     return project_list
 
+
+
+# --save: try each layout in order, mirroring the ISO 8601-ish shapes
+# produced by the supported sources (RFC3339 with "Z", RFC3339 with a
+# numeric offset, or no offset at all -- assumed UTC in that case).
+_TIMESTAMP_FORMATS = (
+    "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S",
+)
+
+
+def parse_timestamp_loose(ts: str):
+    """Parse a Prompt timestamp string in any of the ISO 8601-ish shapes
+    produced by the supported sources. Returns None if ts is empty or
+    doesn't match any known format."""
+    if not ts:
+        return None
+    from datetime import datetime
+
+    normalized = ts.replace("Z", "+0000") if ts.endswith("Z") else ts
+    for fmt in _TIMESTAMP_FORMATS:
+        try:
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def build_save_document(
+    projects: list[Project], source_filter: str, since=None
+) -> dict:
+    """Convert loaded Projects (and their Prompts) into the --save JSON
+    shape. If since (a timezone-aware or naive datetime) is given, only
+    prompts whose start time is on/after it are included; prompts with an
+    unparseable/missing timestamp are always kept, to avoid silently
+    dropping data. since (if given) is also echoed back in the document for
+    traceability."""
+    from datetime import datetime, timezone
+
+    doc = {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source_filter": source_filter,
+        "projects": [],
+    }
+    since_cmp = since
+    if since is not None:
+        doc["since"] = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if since.tzinfo is None:
+            since_cmp = since.replace(tzinfo=timezone.utc)
+
+    for proj in projects:
+        prompts = proj.load_prompts()
+        sp = {
+            "display_name": proj.display_name,
+            "cwd": proj.cwd,
+            "source": proj.source,
+            "prompt_count": 0,
+            "prompts": [],
+        }
+        for p in prompts:
+            if since_cmp is not None:
+                t = parse_timestamp_loose(p.timestamp)
+                if t is not None:
+                    if t.tzinfo is None:
+                        t = t.replace(tzinfo=timezone.utc)
+                    if t < since_cmp:
+                        continue
+            sp["prompts"].append(
+                {
+                    "session_id": p.session_id,
+                    "source": p.source,
+                    "branch": p.branch,
+                    "start_time": p.timestamp,
+                    "end_time": p.end_timestamp,
+                    "user_prompt": p.user_text,
+                    "final_result": p.final_result,
+                    "modified_files": [
+                        {"path": path, "action": action}
+                        for path, action in p.file_changes
+                    ],
+                }
+            )
+        sp["prompt_count"] = len(sp["prompts"])
+        doc["projects"].append(sp)
+    return doc

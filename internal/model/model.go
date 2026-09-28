@@ -202,14 +202,15 @@ type AssistantBlock struct {
 // Prompt is one user turn plus the assistant blocks that follow it, up to
 // the next user turn.
 type Prompt struct {
-	SessionID   string
-	Timestamp   string
-	Branch      string
-	Sidechain   bool
-	UserText    string
-	Blocks      []AssistantBlock
-	TotalTokens int64
-	Source      string // "claude" | "agy" | "gemini" | "opencode"
+	SessionID    string
+	Timestamp    string // start time (first user message)
+	EndTimestamp string // end time (last assistant activity for this prompt)
+	Branch       string
+	Sidechain    bool
+	UserText     string
+	Blocks       []AssistantBlock
+	TotalTokens  int64
+	Source       string // "claude" | "agy" | "gemini" | "opencode" | "copilot"
 }
 
 // FileChange represents one created, modified, or deleted file derived from tool calls.
@@ -220,6 +221,19 @@ type FileChange struct {
 
 func (p *Prompt) FileChanges() []FileChange {
 	return ExtractFileChanges(p)
+}
+
+// FinalResult returns the last assistant "text" block's content for this
+// prompt -- i.e. the final response text shown to the user, ignoring any
+// intermediate tool_use blocks. Empty if the assistant never produced text
+// (e.g. session cut short before a response).
+func (p *Prompt) FinalResult() string {
+	for i := len(p.Blocks) - 1; i >= 0; i-- {
+		if p.Blocks[i].Kind == "text" {
+			return p.Blocks[i].Text
+		}
+	}
+	return ""
 }
 
 var bashStmtSepRE = regexp.MustCompile(`&&|\|\||;|\n`)
@@ -736,17 +750,21 @@ func ParseClaudeSessionFile(path string) []Prompt {
 				sid = sessionID
 			}
 			prompts = append(prompts, Prompt{
-				SessionID: sid,
-				Timestamp: rec.Timestamp,
-				Branch:    rec.GitBranch,
-				Sidechain: rec.IsSidechain,
-				UserText:  userText,
-				Source:    "claude",
+				SessionID:    sid,
+				Timestamp:    rec.Timestamp,
+				EndTimestamp: rec.Timestamp,
+				Branch:       rec.GitBranch,
+				Sidechain:    rec.IsSidechain,
+				UserText:     userText,
+				Source:       "claude",
 			})
 			current = &prompts[len(prompts)-1]
 		} else if rec.Type == "assistant" && current != nil {
 			current.Blocks = append(current.Blocks, extractAssistantBlocks(rec)...)
 			current.TotalTokens += usageTokens(rec)
+			if rec.Timestamp != "" {
+				current.EndTimestamp = rec.Timestamp
+			}
 		}
 		return true
 	})
@@ -838,12 +856,13 @@ func ParseAgyTranscriptFile(path string, sessionID, defaultBranch string) []Prom
 				ts = rec.Timestamp
 			}
 			prompts = append(prompts, Prompt{
-				SessionID: sid,
-				Timestamp: ts,
-				Branch:    branch,
-				Sidechain: false,
-				UserText:  userText,
-				Source:    "agy",
+				SessionID:    sid,
+				Timestamp:    ts,
+				EndTimestamp: ts,
+				Branch:       branch,
+				Sidechain:    false,
+				UserText:     userText,
+				Source:       "agy",
 			})
 			current = &prompts[len(prompts)-1]
 		} else if rec.Type == "PLANNER_RESPONSE" && current != nil {
@@ -864,6 +883,11 @@ func ParseAgyTranscriptFile(path string, sessionID, defaultBranch string) []Prom
 					Kind: "text",
 					Text: rec.Content,
 				})
+			}
+			if ts := rec.CreatedAt; ts != "" {
+				current.EndTimestamp = ts
+			} else if rec.Timestamp != "" {
+				current.EndTimestamp = rec.Timestamp
 			}
 		}
 	}
@@ -919,10 +943,11 @@ func ParseGeminiJsonFile(path string) []Prompt {
 				}
 			}
 			prompts = append(prompts, Prompt{
-				SessionID: sessionID,
-				Timestamp: msg.Timestamp,
-				UserText:  strings.Join(texts, "\n"),
-				Source:    "gemini",
+				SessionID:    sessionID,
+				Timestamp:    msg.Timestamp,
+				EndTimestamp: msg.Timestamp,
+				UserText:     strings.Join(texts, "\n"),
+				Source:       "gemini",
 			})
 			current = &prompts[len(prompts)-1]
 		} else if msg.Type == "gemini" && current != nil {
@@ -931,6 +956,9 @@ func ParseGeminiJsonFile(path string) []Prompt {
 				current.Blocks = append(current.Blocks, AssistantBlock{Kind: "text", Text: s})
 			}
 			current.TotalTokens += msg.Tokens.Total
+			if msg.Timestamp != "" {
+				current.EndTimestamp = msg.Timestamp
+			}
 		}
 	}
 	return prompts
@@ -1010,10 +1038,11 @@ func ParseGeminiJsonlFile(path string) []Prompt {
 						}
 					}
 					prompts = append(prompts, Prompt{
-						SessionID: sessionID,
-						Timestamp: msg.Timestamp,
-						UserText:  strings.Join(texts, "\n"),
-						Source:    "gemini",
+						SessionID:    sessionID,
+						Timestamp:    msg.Timestamp,
+						EndTimestamp: msg.Timestamp,
+						UserText:     strings.Join(texts, "\n"),
+						Source:       "gemini",
 					})
 					current = &prompts[len(prompts)-1]
 				} else if msg.Type == "gemini" && current != nil {
@@ -1022,6 +1051,9 @@ func ParseGeminiJsonlFile(path string) []Prompt {
 						current.Blocks = append(current.Blocks, AssistantBlock{Kind: "text", Text: s})
 					}
 					current.TotalTokens += msg.Tokens.Total
+					if msg.Timestamp != "" {
+						current.EndTimestamp = msg.Timestamp
+					}
 				}
 			}
 			continue
@@ -1047,10 +1079,11 @@ func ParseGeminiJsonlFile(path string) []Prompt {
 				}
 			}
 			prompts = append(prompts, Prompt{
-				SessionID: sessionID,
-				Timestamp: rec.Timestamp,
-				UserText:  strings.Join(texts, "\n"),
-				Source:    "gemini",
+				SessionID:    sessionID,
+				Timestamp:    rec.Timestamp,
+				EndTimestamp: rec.Timestamp,
+				UserText:     strings.Join(texts, "\n"),
+				Source:       "gemini",
 			})
 			current = &prompts[len(prompts)-1]
 		} else if rec.Type == "gemini" && current != nil {
@@ -1060,6 +1093,9 @@ func ParseGeminiJsonlFile(path string) []Prompt {
 			}
 			if rec.Tokens != nil {
 				current.TotalTokens += rec.Tokens.Total
+			}
+			if rec.Timestamp != "" {
+				current.EndTimestamp = rec.Timestamp
 			}
 		}
 	}
@@ -1145,11 +1181,12 @@ func ParseCopilotEventsFile(path string, sessionID, defaultBranch string) []Prom
 				continue
 			}
 			prompts = append(prompts, Prompt{
-				SessionID: sid,
-				Timestamp: rec.Timestamp,
-				Branch:    branch,
-				UserText:  um.Content,
-				Source:    "copilot",
+				SessionID:    sid,
+				Timestamp:    rec.Timestamp,
+				EndTimestamp: rec.Timestamp,
+				Branch:       branch,
+				UserText:     um.Content,
+				Source:       "copilot",
 			})
 			current = &prompts[len(prompts)-1]
 		case "assistant.message":
@@ -1174,6 +1211,9 @@ func ParseCopilotEventsFile(path string, sessionID, defaultBranch string) []Prom
 					ToolName:  name,
 					ToolInput: kvs,
 				})
+			}
+			if rec.Timestamp != "" {
+				current.EndTimestamp = rec.Timestamp
 			}
 		}
 	}
@@ -1730,4 +1770,118 @@ func LoadProjectsWithFilter(aggregateRoot, sourceFilter string) []Project {
 // LoadProjects returns one Project per subdirectory of aggregateRoot.
 func LoadProjects(aggregateRoot string) []Project {
 	return LoadProjectsWithFilter(aggregateRoot, "all")
+}
+
+// timestampLayouts are tried in order when parsing a Prompt's Timestamp/
+// EndTimestamp field, which comes from several different source formats
+// (RFC3339 with "Z", RFC3339 with a numeric offset, or no offset at all --
+// assumed UTC in that case).
+var timestampLayouts = []string{
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02T15:04:05",
+}
+
+// ParseTimestampLoose parses a Prompt timestamp string in any of the ISO
+// 8601-ish shapes produced by the supported sources. Returns ok=false if ts
+// is empty or doesn't match any known layout.
+func ParseTimestampLoose(ts string) (t time.Time, ok bool) {
+	if ts == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range timestampLayouts {
+		if parsed, err := time.Parse(layout, ts); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// SavedFileChange is one (path, action) file change, as embedded in a
+// SavedPrompt by --save.
+type SavedFileChange struct {
+	Path   string `json:"path"`
+	Action string `json:"action"`
+}
+
+// SavedPrompt is one prompt's --save JSON representation: the same
+// information shown when browsing it in apl (user prompt, final assistant
+// response, modified files), plus its start/end time.
+type SavedPrompt struct {
+	SessionID     string            `json:"session_id"`
+	Source        string            `json:"source"`
+	Branch        string            `json:"branch"`
+	StartTime     string            `json:"start_time"`
+	EndTime       string            `json:"end_time"`
+	UserPrompt    string            `json:"user_prompt"`
+	FinalResult   string            `json:"final_result"`
+	ModifiedFiles []SavedFileChange `json:"modified_files"`
+}
+
+// SavedProject is one project's --save JSON representation.
+type SavedProject struct {
+	DisplayName string        `json:"display_name"`
+	Cwd         string        `json:"cwd"`
+	Source      string        `json:"source"`
+	PromptCount int           `json:"prompt_count"`
+	Prompts     []SavedPrompt `json:"prompts"`
+}
+
+// SaveDocument is the full --save JSON document: every project (or just the
+// current one, without --all) matching source_filter, each with its
+// (optionally date-filtered) time-ordered prompts.
+type SaveDocument struct {
+	GeneratedAt  string         `json:"generated_at"`
+	SourceFilter string         `json:"source_filter"`
+	Since        string         `json:"since,omitempty"`
+	Projects     []SavedProject `json:"projects"`
+}
+
+// BuildSaveDocument converts loaded Projects (and their Prompts) into the
+// --save JSON shape. If since is non-nil, only prompts whose start time is
+// on/after it are included; prompts with an unparseable/missing timestamp
+// are always kept, to avoid silently dropping data. since (if given) is
+// also echoed back in the document for traceability.
+func BuildSaveDocument(projects []Project, sourceFilter string, since *time.Time) SaveDocument {
+	doc := SaveDocument{
+		GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
+		SourceFilter: sourceFilter,
+	}
+	if since != nil {
+		doc.Since = since.UTC().Format(time.RFC3339)
+	}
+	for _, proj := range projects {
+		prompts := proj.LoadPrompts()
+		sp := SavedProject{
+			DisplayName: proj.DisplayName,
+			Cwd:         proj.Cwd,
+			Source:      proj.Source,
+		}
+		for _, p := range prompts {
+			if since != nil {
+				if t, ok := ParseTimestampLoose(p.Timestamp); ok && t.Before(*since) {
+					continue
+				}
+			}
+			changes := p.FileChanges()
+			mf := make([]SavedFileChange, 0, len(changes))
+			for _, c := range changes {
+				mf = append(mf, SavedFileChange{Path: c.Path, Action: c.Action})
+			}
+			sp.Prompts = append(sp.Prompts, SavedPrompt{
+				SessionID:     p.SessionID,
+				Source:        p.Source,
+				Branch:        p.Branch,
+				StartTime:     p.Timestamp,
+				EndTime:       p.EndTimestamp,
+				UserPrompt:    p.UserText,
+				FinalResult:   p.FinalResult(),
+				ModifiedFiles: mf,
+			})
+		}
+		sp.PromptCount = len(sp.Prompts)
+		doc.Projects = append(doc.Projects, sp)
+	}
+	return doc
 }

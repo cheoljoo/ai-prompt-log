@@ -220,6 +220,9 @@ class TestParsers(unittest.TestCase):
         self.assertEqual(p.blocks[1].kind, "tool_use")
         self.assertEqual(p.blocks[1].tool_name, "create")
         self.assertEqual(p.blocks[1].tool_input["path"], "/a/new.py")
+        self.assertEqual(p.timestamp, "2026-09-28T00:00:01Z")
+        self.assertEqual(p.end_timestamp, "2026-09-28T00:00:02Z")
+        self.assertEqual(p.final_result, "Done.")
 
     def test_parse_copilot_session_id_fallback(self):
         session_dir = self.tmpdir / "0928abcd-uuid"
@@ -374,6 +377,94 @@ class TestOpencodeSource(unittest.TestCase):
             db_path=self.db_path, cache_dir=self.cache_dir
         )
         self.assertGreaterEqual(convs2[0]["transcript"].stat().st_mtime, first_mtime)
+
+
+class TestParseTimestampLoose(unittest.TestCase):
+    def test_valid_formats(self):
+        self.assertIsNotNone(model.parse_timestamp_loose("2026-09-28T03:55:49.761Z"))
+        self.assertIsNotNone(model.parse_timestamp_loose("2026-09-28T03:55:49Z"))
+        self.assertIsNotNone(model.parse_timestamp_loose("2026-09-28T03:55:49.761+0900"))
+        self.assertIsNotNone(model.parse_timestamp_loose("2026-09-28T03:55:49"))
+
+    def test_invalid_formats(self):
+        self.assertIsNone(model.parse_timestamp_loose(""))
+        self.assertIsNone(model.parse_timestamp_loose("not-a-timestamp"))
+
+
+class TestBuildSaveDocument(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+
+    def _make_project(self):
+        f = self.tmpdir / "events.jsonl"
+        lines = [
+            json.dumps({
+                "type": "session.start",
+                "timestamp": "2020-01-01T00:00:00Z",
+                "data": {"context": {"cwd": "/test/path", "gitRoot": "/test/path", "branch": "main"}},
+            }),
+            json.dumps({
+                "type": "user.message",
+                "timestamp": "2020-01-01T00:00:01Z",
+                "data": {"content": "old prompt"},
+            }),
+            json.dumps({
+                "type": "assistant.message",
+                "timestamp": "2020-01-01T00:00:02Z",
+                "data": {"content": "old result", "toolRequests": []},
+            }),
+            json.dumps({
+                "type": "user.message",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "data": {"content": "new prompt"},
+            }),
+            json.dumps({
+                "type": "assistant.message",
+                "timestamp": "2026-01-01T00:00:02Z",
+                "data": {
+                    "content": "new result",
+                    "toolRequests": [
+                        {"toolCallId": "1", "name": "create", "arguments": {"path": "/a/new.py", "content": "x"}},
+                    ],
+                },
+            }),
+        ]
+        f.write_text("\n".join(lines) + "\n")
+        return model.Project(
+            dir_path=self.tmpdir,
+            display_name="test-proj",
+            cwd="/test/path",
+            source="copilot",
+            session_files=[f],
+        )
+
+    def test_no_filter_keeps_both(self):
+        proj = self._make_project()
+        doc = model.build_save_document([proj], "copilot")
+        self.assertEqual(doc["source_filter"], "copilot")
+        self.assertNotIn("since", doc)
+        self.assertEqual(len(doc["projects"]), 1)
+        prompts = doc["projects"][0]["prompts"]
+        self.assertEqual(doc["projects"][0]["prompt_count"], 2)
+        self.assertEqual(prompts[0]["user_prompt"], "old prompt")
+        self.assertEqual(prompts[0]["final_result"], "old result")
+        self.assertEqual(prompts[0]["start_time"], "2020-01-01T00:00:01Z")
+        self.assertEqual(prompts[0]["end_time"], "2020-01-01T00:00:02Z")
+        self.assertEqual(prompts[1]["user_prompt"], "new prompt")
+        self.assertEqual(prompts[1]["final_result"], "new result")
+        self.assertEqual(prompts[1]["modified_files"], [{"path": "/a/new.py", "action": "created"}])
+
+    def test_since_cutoff_filters_old_prompt(self):
+        from datetime import datetime
+
+        proj = self._make_project()
+        since = datetime(2025, 1, 1)
+        doc = model.build_save_document([proj], "copilot", since=since)
+        self.assertIn("since", doc)
+        prompts = doc["projects"][0]["prompts"]
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0]["user_prompt"], "new prompt")
 
 
 class TestFileChanges(unittest.TestCase):

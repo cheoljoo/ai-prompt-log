@@ -50,7 +50,13 @@ def build_parser() -> argparse.ArgumentParser:
             "`apl --backup` copies session logs into a durable backup "
             "directory (outside live directories, so it survives a "
             "project directory being deleted). `apl --view-backup` browses "
-            "that backup with the same 3-pane view."
+            "that backup with the same 3-pane view.\n\n"
+            "`apl --save` writes the current view (respecting --all/"
+            "--source/--since/--days) to a JSON file -- start/end time, "
+            "user prompt, final result, and modified files per prompt -- "
+            "then exits. Without --save-file, always writes to "
+            "apl-save.json in the current directory (overwritten each "
+            "run)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"{KEYBINDINGS_HELP}\napl {_version()}\nSource: {GIT_URL}",
@@ -100,6 +106,43 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Backup directory for --backup / --view-backup (default: ~/ai-prompt-log.backup/)",
     )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help=(
+            "Save the current view (respecting --all/--source filters, "
+            "--since/--days) to a JSON file -- start/end time, user "
+            "prompt, final result, and modified files per prompt -- "
+            "then exit."
+        ),
+    )
+    parser.add_argument(
+        "--save-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Output path for --save (default: apl-save.json in the current directory, overwritten each time)",
+    )
+    since_grp = parser.add_mutually_exclusive_group()
+    since_grp.add_argument(
+        "--since",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "With --save: only include prompts on/after this date. "
+            "Default: no date filtering (include everything)."
+        ),
+    )
+    since_grp.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "With --save: only include prompts from the last N days. "
+            "Default: no date filtering (include everything)."
+        ),
+    )
 
     source_grp = parser.add_mutually_exclusive_group()
     source_grp.add_argument(
@@ -146,6 +189,12 @@ def main() -> None:
         parser.error("--depth only makes sense with --backup")
     if args.backup_dir is not None and not (args.backup or args.view_backup):
         parser.error("--backup-dir only makes sense with --backup or --view-backup")
+    if args.save and (args.backup or args.view_backup):
+        parser.error("--save is mutually exclusive with --backup and --view-backup")
+    if args.save_file is not None and not args.save:
+        parser.error("--save-file only makes sense with --save")
+    if (args.since or args.days is not None) and not args.save:
+        parser.error("--since/--days only make sense with --save")
 
     if args.agy or args.gemini:
         source_filter = "agy"
@@ -176,12 +225,58 @@ def main() -> None:
             )
         return
 
+    if args.save:
+        _run_save(args, source_filter)
+        return
+
     from .tui import AplApp
 
     if args.view_backup:
         AplApp(root_override=backup_dir, source_filter=source_filter).run()
     else:
         AplApp(aggregate=args.all, source_filter=source_filter).run()
+
+
+def _run_save(args: argparse.Namespace, source_filter: str) -> None:
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from . import model, source as source_mod
+
+    since = None
+    if args.since:
+        try:
+            since = datetime.strptime(args.since, "%Y-%m-%d")
+        except ValueError:
+            print(f"invalid --since date: {args.since!r} (expected YYYY-MM-DD)", file=sys.stderr)
+            sys.exit(1)
+    elif args.days is not None:
+        since = datetime.now(timezone.utc) - timedelta(days=args.days)
+
+    mode, root = source_mod.detect_mode(
+        Path.cwd(), aggregate=args.all, source_filter=source_filter
+    )
+    if mode == "aggregate":
+        projects = model.load_projects(root, source_filter=source_filter)
+    else:
+        projects = [model.load_project(root, source_filter=source_filter)]
+
+    doc = model.build_save_document(projects, source_filter, since=since)
+
+    save_path = args.save_file
+    if save_path is None:
+        save_path = Path("apl-save.json")
+
+    with save_path.open("w") as fh:
+        json.dump(doc, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+
+    total_prompts = sum(p["prompt_count"] for p in doc["projects"])
+    print(
+        f"apl save: {len(doc['projects'])} project(s), {total_prompts} prompt(s) -> {save_path}"
+    )
+    if total_prompts == 0:
+        print("no matching prompts for the given filters", file=sys.stderr)
 
 
 if __name__ == "__main__":

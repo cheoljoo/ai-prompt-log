@@ -2,14 +2,18 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"runtime/debug"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/cheoljoo/ai-prompt-log/internal/backup"
+	"github.com/cheoljoo/ai-prompt-log/internal/model"
+	"github.com/cheoljoo/ai-prompt-log/internal/source"
 	"github.com/cheoljoo/ai-prompt-log/internal/tui"
 )
 
@@ -54,6 +58,10 @@ func main() {
 	viewBackup := flag.Bool("view-backup", false, "Browse a previous --backup (3-pane aggregate view, rooted at --backup-dir)")
 	depth := flag.Int("depth", 0, "With --backup: walk up N directories from cwd and back up every project whose real cwd is that directory or a descendant of it. Omit to back up only the current project.")
 	backupDir := flag.String("backup-dir", "", "Backup directory for --backup / --view-backup (default: ~/ai-prompt-log.backup/)")
+	doSave := flag.Bool("save", false, "Save the current view (respecting --all/--source filters, --since/--days) to a JSON file -- start/end time, user prompt, final result, and modified files per prompt -- then exit.")
+	saveFile := flag.String("save-file", "", "Output path for --save (default: apl-save.json in the current directory, overwritten each time)")
+	since := flag.String("since", "", "With --save: only include prompts on/after this date (YYYY-MM-DD). Default: no date filtering (include everything).")
+	days := flag.Int("days", 0, "With --save: only include prompts from the last N days. Mutually exclusive with --since. Default: no date filtering (include everything).")
 	sourceFlag := flag.String("source", "all", "AI assistant log source to display (all, claude, agy, gemini, opencode, copilot)")
 	flag.StringVar(sourceFlag, "s", "all", "shorthand for --source")
 	onlyAgy := flag.Bool("agy", false, "Display only Antigravity CLI (agy) logs")
@@ -73,7 +81,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "`apl --backup` copies session logs into a durable backup directory (outside\n")
 		fmt.Fprintf(os.Stderr, "live directories, so it survives a project directory being deleted).\n")
 		fmt.Fprintf(os.Stderr, "`apl --view-backup` browses that backup with the same 3-pane view.\n\n")
-		fmt.Fprintf(os.Stderr, "Usage: apl [-a|--all | --backup | --view-backup] [--depth N] [--backup-dir PATH] [-s|--source {all,claude,agy,gemini,opencode,copilot} | --agy | --claude | --gemini | --opencode | --copilot]\n\n")
+		fmt.Fprintf(os.Stderr, "`apl --save` writes the current view (respecting --all/--source/--since/--days)\n")
+		fmt.Fprintf(os.Stderr, "to a JSON file (start/end time, user prompt, final result, modified files per prompt) and exits.\n")
+		fmt.Fprintf(os.Stderr, "Without --save-file, always writes to apl-save.json in the current directory (overwritten each run).\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: apl [-a|--all | --backup | --view-backup | --save] [--depth N] [--backup-dir PATH]\n")
+		fmt.Fprintf(os.Stderr, "           [--save-file PATH] [--since YYYY-MM-DD | --days N]\n")
+		fmt.Fprintf(os.Stderr, "           [-s|--source {all,claude,agy,gemini,opencode,copilot} | --agy | --claude | --gemini | --opencode | --copilot]\n\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n%s\napl %s\nSource: %s\n", keybindingsHelp, resolvedVersion(), gitURL)
 	}
@@ -116,11 +129,23 @@ func main() {
 	if modeCount > 1 {
 		fail("--all, --backup, and --view-backup are mutually exclusive")
 	}
+	if *doSave && (*doBackup || *viewBackup) {
+		fail("--save is mutually exclusive with --backup and --view-backup")
+	}
 	if depthGiven && !*doBackup {
 		fail("--depth only makes sense with --backup")
 	}
 	if *backupDir != "" && !(*doBackup || *viewBackup) {
 		fail("--backup-dir only makes sense with --backup or --view-backup")
+	}
+	if *saveFile != "" && !*doSave {
+		fail("--save-file only makes sense with --save")
+	}
+	if *since != "" && *days != 0 {
+		fail("--since and --days are mutually exclusive")
+	}
+	if (*since != "" || *days != 0) && !*doSave {
+		fail("--since/--days only make sense with --save")
 	}
 
 	dir := backup.DefaultDir()
@@ -143,6 +168,54 @@ func main() {
 		fmt.Println(backup.FormatSummary(stats, dir))
 		if stats.Projects == 0 {
 			fmt.Fprintln(os.Stderr, "no matching project found for this directory")
+		}
+		return
+	}
+
+	if *doSave {
+		var cutoff *time.Time
+		if *since != "" {
+			t, err := time.Parse("2006-01-02", *since)
+			if err != nil {
+				fail("invalid --since date %q: expected YYYY-MM-DD", *since)
+			}
+			cutoff = &t
+		} else if *days > 0 {
+			t := time.Now().AddDate(0, 0, -*days)
+			cutoff = &t
+		}
+
+		mode, root := source.DetectModeWithFilter(cwd, *all, sourceFilter)
+		var projects []model.Project
+		if mode == "aggregate" {
+			projects = model.LoadProjectsWithFilter(root, sourceFilter)
+		} else {
+			projects = []model.Project{model.LoadProjectWithFilter(root, sourceFilter)}
+		}
+
+		doc := model.BuildSaveDocument(projects, sourceFilter, cutoff)
+		data, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "apl:", err)
+			os.Exit(1)
+		}
+
+		outPath := *saveFile
+		if outPath == "" {
+			outPath = "apl-save.json"
+		}
+		if err := os.WriteFile(outPath, data, 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "apl:", err)
+			os.Exit(1)
+		}
+
+		promptTotal := 0
+		for _, p := range doc.Projects {
+			promptTotal += p.PromptCount
+		}
+		fmt.Printf("apl save: %d project(s), %d prompt(s) -> %s\n", len(doc.Projects), promptTotal, outPath)
+		if promptTotal == 0 {
+			fmt.Fprintln(os.Stderr, "no matching prompts found for this directory/filter")
 		}
 		return
 	}
