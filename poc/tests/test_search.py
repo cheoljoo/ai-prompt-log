@@ -1,4 +1,8 @@
+import json
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
 from apl import model, tui
 
@@ -155,6 +159,90 @@ class TestSearchNavigation(unittest.TestCase):
         self.assertEqual(table.border_subtitle, "<foo  (1/3)")
         screen.action_search_next()
         self.assertEqual(table.border_subtitle, "<foo  (2/3)")
+
+
+class TestSearchModalIsCenteredAndVisible(unittest.IsolatedAsyncioTestCase):
+    """Confirms the search dialog is a centered, high-contrast overlay (not
+    an easy-to-miss line docked at the bottom next to the Footer), and that
+    typed characters render with a clearly visible (non-default) style."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.backup_root = self.tmpdir / "backup"
+        proj_dir = self.backup_root / "my-project"
+        proj_dir.mkdir(parents=True)
+        f = proj_dir / "s1.jsonl"
+        f.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "sessionId": "c1",
+                    "timestamp": "2026-09-01T10:00:00Z",
+                    "message": {"content": "fix the login bug"},
+                }
+            )
+            + "\n"
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    async def test_modal_is_centered_and_text_is_high_contrast(self):
+        from apl.tui import AplApp
+
+        app = AplApp(root_override=self.backup_root)
+        async with app.run_test(size=(100, 40)) as pilot:
+            screen = app.screen
+            overlay = screen.query_one("#search-overlay")
+            self.assertFalse(overlay.display, "search overlay should start hidden")
+
+            await pilot.press("/")
+            await pilot.pause()
+            self.assertTrue(overlay.display, "search overlay should open on '/'")
+
+            for ch in "bug":
+                await pilot.press(ch)
+            await pilot.pause()
+
+            box = screen.query_one("#search-box")
+            # The box should be roughly centered on both axes (within 2
+            # cells, to allow for even/odd rounding).
+            box_mid_x = box.region.x + box.region.width / 2
+            box_mid_y = box.region.y + box.region.height / 2
+            self.assertAlmostEqual(box_mid_x, screen.size.width / 2, delta=2)
+            self.assertAlmostEqual(box_mid_y, screen.size.height / 2, delta=2)
+
+            inp = screen.query_one("#search-input")
+            strip = inp.render_line(0)
+            typed_segments = [seg for seg in strip if seg.text.strip() == "bug"]
+            self.assertTrue(typed_segments, "expected the typed 'bug' text to be rendered")
+            style = typed_segments[0].style
+            # High-contrast, explicit (non-transparent/non-default) colors:
+            # bold, and a light foreground clearly distinct from the dark
+            # background -- guards against the text blending invisibly into
+            # its background regardless of the active theme/terminal.
+            self.assertTrue(style.bold)
+            self.assertIsNotNone(style.color)
+            self.assertIsNotNone(style.bgcolor)
+            self.assertNotEqual(style.color.get_truecolor(), style.bgcolor.get_truecolor())
+
+            # Regression guard: Textual's Input widget defaults to its own
+            # 3-row-tall bordered box (border: tall ...; height: 3;). If
+            # #search-input's border/height ever stop being overridden to
+            # "none"/1, the widget renders 3 rows tall instead of 1 --
+            # overflowing past our single-line #search-row and corrupting
+            # the outer box's bottom border/padding, reproducing the "blue
+            # box inside the yellow box isn't fully visible" bug (even
+            # though its bottom edge can still land inside the outer box's
+            # bounding rectangle by coincidence, so a containment check
+            # alone wouldn't catch this -- assert the exact height instead).
+            self.assertEqual(
+                inp.region.height,
+                1,
+                "search-input must render as a single line; Textual's Input "
+                "defaults to a bordered 3-line box unless height/border are "
+                "explicitly overridden",
+            )
 
 
 if __name__ == "__main__":

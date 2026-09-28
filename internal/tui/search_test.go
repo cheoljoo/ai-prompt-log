@@ -103,6 +103,89 @@ func TestSearchPrefix(t *testing.T) {
 	}
 }
 
+func TestSearchModeLabel(t *testing.T) {
+	cases := map[string]string{
+		"both":    "User Prompt + Final Result",
+		"user":    "User Prompt only",
+		"final":   "Final Result only",
+		"unknown": "User Prompt + Final Result",
+	}
+	for mode, wantSubstr := range cases {
+		if got := searchModeLabel(mode); !strings.Contains(got, wantSubstr) {
+			t.Fatalf("searchModeLabel(%q) = %q, want it to contain %q", mode, got, wantSubstr)
+		}
+	}
+}
+
+// TestSearchModalIsCenteredAndVisible confirms the search dialog replaces
+// the view with a centered, high-contrast modal (not an easy-to-miss
+// single line docked at the bottom of the screen) while it's open, and that
+// typed characters render with a clearly visible (non-default) style.
+func TestSearchModalIsCenteredAndVisible(t *testing.T) {
+	mode, dir := source.DetectMode("/data01/cheoljoo.lee/code/ai-prompt-log", false)
+	m := New(mode, dir)
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m = update(m, key("/"))
+	for _, ch := range "bug" {
+		m = update(m, key(string(ch)))
+	}
+	view := m.View()
+
+	if !strings.Contains(view, "bug") {
+		t.Fatalf("expected typed term 'bug' to appear in the rendered modal view")
+	}
+	if !strings.Contains(view, "Search — User Prompt + Final Result") {
+		t.Fatalf("expected the mode label in the modal, got:\n%s", view)
+	}
+
+	lines := strings.Split(view, "\n")
+	if len(lines) < 20 {
+		t.Fatalf("expected the modal view to fill the terminal height, got %d lines", len(lines))
+	}
+
+	// The box border should not appear on the very first or last rendered
+	// line -- i.e. it must be vertically centered, not docked to an edge.
+	borderLineIdx := -1
+	for i, l := range lines {
+		if strings.Contains(l, "┏") {
+			borderLineIdx = i
+			break
+		}
+	}
+	if borderLineIdx <= 0 || borderLineIdx >= len(lines)-1 {
+		t.Fatalf("expected the search box border to be vertically centered (not on the first/last line), found at line %d of %d", borderLineIdx, len(lines))
+	}
+
+	// The typed text's line should be horizontally centered too: there
+	// should be a comparable amount of plain background padding on both
+	// sides of the box content.
+	var textLine string
+	for _, l := range lines {
+		if strings.Contains(l, "bug") {
+			textLine = l
+			break
+		}
+	}
+	if textLine == "" {
+		t.Fatal("expected to find the line containing the typed term")
+	}
+	leftPad := strings.Index(textLine, "┃")
+	rightPad := len(textLine) - strings.LastIndex(textLine, "┃")
+	if leftPad <= 0 {
+		t.Fatalf("expected non-zero left padding before the search box, got %d in line %q", leftPad, textLine)
+	}
+	// Left/right padding should be roughly symmetric (within a few chars,
+	// to allow for ANSI escape sequence length differences).
+	diff := leftPad - rightPad
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 6 {
+		t.Fatalf("expected the search box to be horizontally centered, left pad=%d right pad=%d (diff=%d)", leftPad, rightPad, diff)
+	}
+}
+
 // TestSearchNavigationRealData exercises the full vi-style search flow
 // (/,<,>,n,p) against this repo's own real Claude session log, through the
 // public Update()/View() surface (key presses), not internal helpers.

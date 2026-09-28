@@ -23,7 +23,7 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, Static
 
@@ -33,6 +33,11 @@ MAX_TOOL_ARGS_SHOWN = 4
 MAX_TOOL_VALUE_LEN = 160
 
 SEARCH_PREFIX = {"both": "/", "user": "<", "final": ">"}
+SEARCH_LABEL = {
+    "both": "Search (User Prompt + Final Result)",
+    "user": "Search (User Prompt only)",
+    "final": "Search (Final Result only)",
+}
 
 
 def escape(text: str) -> str:
@@ -270,8 +275,8 @@ class AplScreen(Screen):
         Binding("ctrl+u", "half_page_up", "½ page up", key_display="^U"),
         Binding("ctrl+l", "reload", "Reload", key_display="^L"),
         Binding("/", "start_search_both", "Search", key_display="/"),
-        Binding("<", "start_search_user", "Search USER", show=False),
-        Binding(">", "start_search_final", "Search RESULT", show=False),
+        Binding("<", "start_search_user", "Search USER", key_display="<"),
+        Binding(">", "start_search_final", "Search RESULT", key_display=">"),
         Binding("n", "search_next", "Next match", key_display="n"),
         Binding("p", "search_prev", "Prev match", key_display="p"),
     ]
@@ -300,9 +305,12 @@ class AplScreen(Screen):
                 yield DataTable(id="projects-table", classes="pane")
             yield DataTable(id="prompts-table", classes="pane")
             yield DetailPane(id="detail-pane", classes="pane")
-        with Horizontal(id="search-bar"):
-            yield Static("/", id="search-prefix")
-            yield Input(id="search-input", placeholder="search keyword…")
+        with Container(id="search-overlay"):
+            with Container(id="search-box"):
+                yield Static("Search", id="search-title")
+                with Horizontal(id="search-row"):
+                    yield Static("/", id="search-prefix")
+                    yield Input(id="search-input", placeholder="type keyword, Enter to search…")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -316,7 +324,7 @@ class AplScreen(Screen):
         prompts_table.add_column("Summary")
         prompts_table.border_title = "Prompts"
         self.query_one("#detail-pane", DetailPane).border_title = "Detail"
-        self.query_one("#search-bar").display = False
+        self.query_one("#search-overlay").display = False
 
         if self.mode == "aggregate":
             projects_table = self.query_one("#projects-table", DataTable)
@@ -503,7 +511,7 @@ class AplScreen(Screen):
         self.focus_next()
 
     def action_focus_prev_pane(self) -> None:
-        if self.query_one("#search-bar").display:
+        if self.query_one("#search-overlay").display:
             self._cancel_search()
             return
         self.focus_previous()
@@ -512,9 +520,10 @@ class AplScreen(Screen):
 
     def _begin_search(self, mode: str) -> None:
         self._pending_search_mode = mode
-        bar = self.query_one("#search-bar")
-        bar.display = True
+        self.query_one("#search-title", Static).update(SEARCH_LABEL[mode])
         self.query_one("#search-prefix", Static).update(SEARCH_PREFIX[mode])
+        overlay = self.query_one("#search-overlay")
+        overlay.display = True
         inp = self.query_one("#search-input", Input)
         inp.value = ""
         inp.focus()
@@ -529,7 +538,7 @@ class AplScreen(Screen):
         self._begin_search("final")
 
     def _cancel_search(self) -> None:
-        self.query_one("#search-bar").display = False
+        self.query_one("#search-overlay").display = False
         table = self.query_one("#prompts-table", DataTable)
         table.focus()
 
@@ -607,6 +616,7 @@ class AplApp(App):
     CSS = """
     Screen {
         background: $surface;
+        layers: base overlay;
     }
     .pane {
         border: round $panel;
@@ -623,19 +633,55 @@ class AplApp(App):
     #detail-pane {
         width: 1fr;
     }
-    #search-bar {
-        height: 3;
-        background: $panel;
-        border: heavy $accent;
+    #search-overlay {
+        layer: overlay;
+        width: 100%;
+        height: 100%;
+        align: center middle;
+        display: none;
+    }
+    #search-box {
+        width: 70%;
+        max-width: 90;
+        height: 7;
+        background: black;
+        border: thick yellow;
+        padding: 1 2;
+    }
+    #search-title {
+        text-style: bold;
+        color: yellow;
+        margin-bottom: 1;
     }
     #search-prefix {
         width: 3;
         content-align: center middle;
         text-style: bold;
-        color: $accent;
+        color: yellow;
     }
     #search-input {
         width: 1fr;
+        height: 1;
+        border: none;
+        padding: 0 1;
+        background: black;
+        color: white;
+        text-style: bold;
+    }
+    #search-input:focus {
+        border: none;
+        background: black;
+        color: white;
+        text-style: bold;
+    }
+    #search-input > .input--cursor {
+        background: yellow;
+        color: black;
+    }
+    #search-input > .input--placeholder {
+        background: black;
+        color: grey;
+        text-style: italic;
     }
     """
 

@@ -50,6 +50,8 @@ var (
 	styleBrightMagenta  = lipgloss.NewStyle().Foreground(lipgloss.Color("13")).Bold(true)
 	styleBold           = lipgloss.NewStyle().Bold(true)
 	styleSearchMatch    = lipgloss.NewStyle().Reverse(true).Bold(true).Foreground(lipgloss.Color("3"))
+	styleSearchTitle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
+	styleSearchBox      = lipgloss.NewStyle().Border(lipgloss.ThickBorder()).BorderForeground(lipgloss.Color("3")).Background(lipgloss.Color("0")).Foreground(lipgloss.Color("15")).Padding(1, 2)
 	paneStyle           = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
 	paneFocusStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6"))
 	labelStyle          = lipgloss.NewStyle().Bold(true)
@@ -320,8 +322,15 @@ func NewWithFilter(mode, rootDir, sourceFilter string) Model {
 		searchMode:   "both",
 	}
 	m.searchInput = textinput.New()
-	m.searchInput.Placeholder = "search keyword…"
+	m.searchInput.Placeholder = "type keyword, Enter to search…"
 	m.searchInput.Prompt = "/ "
+	// Explicit, terminal-independent high-contrast styling (bold white on
+	// black) so typed text is always clearly visible regardless of the
+	// user's terminal theme -- don't rely on ambient/default colors.
+	m.searchInput.TextStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("0"))
+	m.searchInput.PromptStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3")).Background(lipgloss.Color("0"))
+	m.searchInput.PlaceholderStyle = lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("8")).Background(lipgloss.Color("0"))
+	m.searchInput.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("3"))
 
 	promptCols := []table.Column{
 		{Title: "Date", Width: 19},
@@ -541,7 +550,20 @@ func (m *Model) layout() {
 	m.detail.Width = detailW - borderW
 	m.detail.Height = contentH
 
-	searchW := m.width - 4
+	// Match renderSearchModal's box sizing so the input's visible width
+	// stays within the centered dialog (box width minus border, padding,
+	// and the "/ " prompt).
+	boxWidth := m.width * 70 / 100
+	if boxWidth > 90 {
+		boxWidth = 90
+	}
+	if boxWidth < 30 {
+		boxWidth = 30
+	}
+	if boxWidth > m.width-4 {
+		boxWidth = m.width - 4
+	}
+	searchW := boxWidth - 2 /*border*/ - 4 /*padding*/ - 2 /*prompt*/
 	if searchW < 10 {
 		searchW = 10
 	}
@@ -874,6 +896,10 @@ func (m *Model) setFocus(p pane) {
 }
 
 func (m Model) View() string {
+	if m.searchBarVisible {
+		return m.renderSearchModal()
+	}
+
 	var panes []string
 	if m.mode == "aggregate" {
 		panes = append(panes, m.renderPane("Projects", m.projectsTable.View(), m.focus == paneProjects))
@@ -882,7 +908,7 @@ func (m Model) View() string {
 	panes = append(panes, m.renderPane("Detail", m.detail.View(), m.focus == paneDetail))
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, panes...)
-	footer := styleDim.Render("j/k move  g/G top/bottom  ^F/^B/Space page  ^D/^U half-page  l/Tab/Enter next pane  h/S-Tab/Esc prev pane  /</> search  n/p next/prev match  ^L reload  q quit")
+	footer := styleDim.Render("j/k move  g/G top/bottom  ^F/^B/Space page  ^D/^U half-page  l/Tab/Enter next pane  h/S-Tab/Esc prev pane  /search-both  <search-USER  >search-RESULT  n/p next/prev match  ^L reload  q quit")
 	if m.statusMessage != "" {
 		style := styleDim
 		if m.changesPending {
@@ -890,12 +916,58 @@ func (m Model) View() string {
 		}
 		footer = style.Render(m.statusMessage) + "  " + footer
 	}
-	view := body + "\n"
-	if m.searchBarVisible {
-		view += m.searchInput.View() + "\n"
+	return body + "\n" + footer
+}
+
+// searchModeLabel is the human-readable title shown atop the search modal
+// for each search mode.
+func searchModeLabel(mode string) string {
+	switch mode {
+	case "user":
+		return "Search — User Prompt only"
+	case "final":
+		return "Search — Final Result only"
+	default:
+		return "Search — User Prompt + Final Result"
 	}
-	view += footer
-	return view
+}
+
+// renderSearchModal replaces the whole view with a centered, high-contrast
+// (bold white on black, thick yellow border) dialog while the search bar is
+// open -- Bubble Tea has no true overlay/layer compositing like Textual, so
+// a full-screen modal is the simplest way to guarantee the search box (and
+// the text being typed into it) is always clearly visible, centered,
+// regardless of terminal theme.
+func (m Model) renderSearchModal() string {
+	width, height := m.width, m.height
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 24
+	}
+
+	boxWidth := width * 70 / 100
+	if boxWidth > 90 {
+		boxWidth = 90
+	}
+	if boxWidth < 30 {
+		boxWidth = 30
+	}
+	if boxWidth > width-4 {
+		boxWidth = width - 4
+	}
+
+	title := styleSearchTitle.Render(searchModeLabel(m.pendingSearchMode))
+	content := title + "\n\n" + m.searchInput.View()
+	box := styleSearchBox.Width(boxWidth).Render(content)
+
+	return lipgloss.Place(
+		width, height,
+		lipgloss.Center, lipgloss.Center,
+		box,
+		lipgloss.WithWhitespaceBackground(lipgloss.Color("0")),
+	)
 }
 
 func (m Model) renderPane(title, body string, focused bool) string {
