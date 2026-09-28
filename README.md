@@ -74,6 +74,8 @@ apl --help       # usage, keybindings, this repo's URL
 
 apl --backup                  # back up current project (Claude + AGY + OpenCode + Copilot CLI)
 apl --backup --depth 1        # + every sibling project under the parent directory
+apl --backup --all            # back up every project apl knows about (all sources)
+apl --backup --all --copilot  # back up every project, Copilot CLI logs only
 apl --backup --backup-dir PATH  # use a custom backup location (default: ~/ai-prompt-log.backup/)
 apl --view-backup              # browse a previous --backup (3 panes, like --all)
 
@@ -95,6 +97,7 @@ Claude Code only keeps session logs under `~/.claude/projects/<encoded-cwd>/` �
 
 - `apl --backup` with no `--depth` backs up only the current project (same nearest-ancestor resolution as plain `apl`).
 - `apl --backup --depth N` walks up `N` directories from cwd and backs up *every* project whose real `cwd` (read from the logs themselves, not guessed from the encoded directory name) is that directory or a descendant of it — handy for backing up a whole `~/code/` tree of sibling projects in one go.
+- `apl --backup --all` backs up *every* project apl knows about across all sources, regardless of cwd (like `apl --all`'s aggregate view) — mutually exclusive with `--depth`. Add a source flag (`--copilot`, `--claude`, etc.) to restrict which source gets backed up.
 - `apl --view-backup` opens the same 3-pane aggregate view as `apl --all`, but rooted at the backup directory instead of the live `~/.claude/projects`.
 
 ### Saving prompts to a JSON file

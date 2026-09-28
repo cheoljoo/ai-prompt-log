@@ -609,6 +609,16 @@ class TestBackupAndIntegration(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
 
+    def test_select_all_projects_includes_this_repo(self):
+        projs = backup.select_all_projects(source_filter="claude")
+        self.assertTrue(projs, "expected --all (claude) to find at least one project")
+        cwds = {p.cwd for p in projs}
+        self.assertIn(
+            "/data01/cheoljoo.lee/code/ai-prompt-log",
+            cwds,
+            f"expected --all to include this repo's own project among {len(projs)} projects",
+        )
+
     def test_backup_and_view(self):
         # Create a mock project
         ws_path = Path("/data01/cheoljoo.lee/code/test-proj")

@@ -67,6 +67,12 @@ def select_projects(
     return find_projects_by_cwd_ancestry(root, source_filter=source_filter)
 
 
+def select_all_projects(source_filter: str = "all") -> list[model.Project]:
+    """Every project apl knows about across all sources (like `apl --all`'s
+    aggregate view), for `apl --backup --all`."""
+    return [p for p in model.load_projects(source_filter=source_filter) if p.session_files]
+
+
 def copy_project(proj: model.Project, dest_root: Path) -> tuple[int, int, int]:
     """Incrementally copy one project's session files into dest_root/<encoded-cwd>/.
 
@@ -197,6 +203,19 @@ def run_backup(
 ) -> BackupStats:
     backup_dir.mkdir(parents=True, exist_ok=True)
     projects = select_projects(cwd, depth, source_filter=source_filter)
+    stats = BackupStats(projects=len(projects))
+    for proj in projects:
+        copied, updated, unchanged = copy_project(proj, backup_dir)
+        stats.copied += copied
+        stats.updated += updated
+        stats.unchanged += unchanged
+    return stats
+
+
+def run_backup_all(backup_dir: Path, source_filter: str = "all") -> BackupStats:
+    """`apl --backup --all`: back up every project apl knows about, regardless of cwd."""
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    projects = select_all_projects(source_filter=source_filter)
     stats = BackupStats(projects=len(projects))
     for proj in projects:
         copied, updated, unchanged = copy_project(proj, backup_dir)

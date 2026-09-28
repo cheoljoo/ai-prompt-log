@@ -89,6 +89,20 @@ func SelectProjectsWithFilter(cwd string, depth *int, sourceFilter string) []mod
 	return FindProjectsByCwdAncestry(root, sourceFilter)
 }
 
+// SelectAllProjectsWithFilter returns every project apl knows about across
+// all sources (like `apl --all`'s aggregate view), for `apl --backup --all`.
+func SelectAllProjectsWithFilter(sourceFilter string) []model.Project {
+	home, _ := os.UserHomeDir()
+	all := model.LoadProjectsWithFilter(home, sourceFilter)
+	out := make([]model.Project, 0, len(all))
+	for _, p := range all {
+		if len(p.GetSessionFiles()) > 0 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // SelectProjects decides which projects apl --backup should copy (defaults to all sources).
 func SelectProjects(cwd string, depth *int) []model.Project {
 	return SelectProjectsWithFilter(cwd, depth, "all")
@@ -343,6 +357,22 @@ func CopyProjectDir(srcDir, destRoot string) (copied, updated, unchanged int) {
 func RunWithFilter(cwd string, depth *int, backupDir, sourceFilter string) Stats {
 	_ = os.MkdirAll(backupDir, 0o755)
 	projects := SelectProjectsWithFilter(cwd, depth, sourceFilter)
+	stats := Stats{Projects: len(projects)}
+	for _, p := range projects {
+		c, u, un := CopyProject(p, backupDir)
+		stats.Copied += c
+		stats.Updated += u
+		stats.Unchanged += un
+	}
+	return stats
+}
+
+// RunAllWithFilter performs a full apl --backup --all invocation: every
+// project apl knows about across all sources (like the `apl --all` view),
+// regardless of cwd.
+func RunAllWithFilter(backupDir, sourceFilter string) Stats {
+	_ = os.MkdirAll(backupDir, 0o755)
+	projects := SelectAllProjectsWithFilter(sourceFilter)
 	stats := Stats{Projects: len(projects)}
 	for _, p := range projects {
 		c, u, un := CopyProject(p, backupDir)
