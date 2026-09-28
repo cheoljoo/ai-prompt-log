@@ -3,6 +3,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from apl import backup, model, source
@@ -389,6 +390,162 @@ class TestParseTimestampLoose(unittest.TestCase):
     def test_invalid_formats(self):
         self.assertIsNone(model.parse_timestamp_loose(""))
         self.assertIsNone(model.parse_timestamp_loose("not-a-timestamp"))
+
+
+class TestPromptOrderingAcrossFiles(unittest.TestCase):
+    """Regression tests for a real user-reported bug: an old ("agy") session
+    file appeared ABOVE much more recent ("claude") prompts at the very top
+    of the Prompts list, because build_prompts_from_files() only sorted
+    whole FILES by a per-file heuristic timestamp and then concatenated
+    each file's prompts verbatim -- so a file whose heuristic timestamp
+    diverges from its actual prompt content's timestamps (or that spans a
+    huge time range because it kept getting reopened/appended to) could
+    strand its prompts far from where they chronologically belong. The fix
+    re-sorts the merged list by each individual Prompt's own timestamp."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_file_heuristic_mismatch_does_not_corrupt_final_order(self):
+        # Directly proves the fix's mechanism: even if the cheap per-FILE
+        # pre-sort heuristic (_session_start_timestamp) is flat-out wrong
+        # for one file -- e.g. it mistook a session-id/UUID for a
+        # timestamp and judged an old file to be "newest" -- the final
+        # merged order must still be correct, because it's re-sorted by
+        # each PROMPT's own (correctly parsed) timestamp afterwards.
+        old_agy = self.tmpdir / "old_agy.jsonl"
+        old_agy.write_text(
+            json.dumps(
+                {
+                    "step_index": 0,
+                    "type": "USER_INPUT",
+                    "source": "USER_EXPLICIT",
+                    "created_at": "2026-08-06T12:41:56Z",
+                    "content": "<USER_REQUEST>old agy prompt</USER_REQUEST>",
+                }
+            )
+            + "\n"
+        )
+        recent_claude = self.tmpdir / "recent_claude.jsonl"
+        recent_claude.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "sessionId": "c1",
+                    "timestamp": "2026-09-28T15:06:17Z",
+                    "message": {"content": "recent claude prompt"},
+                }
+            )
+            + "\n"
+        )
+
+        original_start_ts = model._session_start_timestamp
+
+        def fake_start_ts(path):
+            # Simulate the heuristic misfiring: it thinks the OLD agy file
+            # is actually the NEWEST one (a bogus/UUID-like value that
+            # lexicographically sorts after any real "2026-..." date).
+            if path == old_agy:
+                return "zzzz-uuid-not-really-a-date"
+            return original_start_ts(path)
+
+        with unittest.mock.patch.object(model, "_session_start_timestamp", side_effect=fake_start_ts):
+            prompts = model.build_prompts_from_files([old_agy, recent_claude])
+
+        self.assertEqual([p.user_text for p in prompts], ["old agy prompt", "recent claude prompt"])
+        newest_first = list(reversed(prompts))
+        self.assertEqual(newest_first[0].user_text, "recent claude prompt")
+
+    def test_old_session_no_longer_strands_above_recent_ones(self):
+        # An old AGY session (Aug 6) whose transcript's own first line is a
+        # metadata/session-id record with NO real timestamp field at all
+        # (as apl --backup's synthesized "agy_metadata" header is, and as
+        # some real Antigravity transcripts' leading records can be) --
+        # the file-level heuristic can't find a timestamp on that line and
+        # must fall through to the real (old) prompt content below it.
+        old_agy = self.tmpdir / "old_agy.jsonl"
+        old_agy.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "agy_metadata", "sessionId": "79ce52e6-5e7b-40e2-b77c-29aa8dcb3ac6"}),
+                    json.dumps(
+                        {
+                            "step_index": 0,
+                            "type": "USER_INPUT",
+                            "source": "USER_EXPLICIT",
+                            "created_at": "2026-08-06T12:41:56Z",
+                            "content": "<USER_REQUEST>old agy prompt</USER_REQUEST>",
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+        recent_claude = self.tmpdir / "recent_claude.jsonl"
+        recent_claude.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "sessionId": "c1",
+                            "timestamp": "2026-09-28T15:06:17Z",
+                            "message": {"content": "recent claude prompt"},
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+        prompts = model.build_prompts_from_files([old_agy, recent_claude])
+        self.assertEqual(len(prompts), 2)
+        # Ascending (oldest-first) order: the Aug agy prompt must sort
+        # BEFORE the Sept claude prompt, regardless of file iteration
+        # order or which file "looks newer" by a naive per-file heuristic.
+        self.assertEqual(prompts[0].source, "agy")
+        self.assertEqual(prompts[0].user_text, "old agy prompt")
+        self.assertEqual(prompts[1].source, "claude")
+        self.assertEqual(prompts[1].user_text, "recent claude prompt")
+
+        # And once the TUI's newest-first reversal is applied (as
+        # tui.py's _load_prompts_for does), the recent claude prompt must
+        # be on top, not the old agy one.
+        newest_first = list(reversed(prompts))
+        self.assertEqual(newest_first[0].source, "claude")
+        self.assertEqual(newest_first[-1].source, "agy")
+
+    def test_long_lived_file_prompts_interleave_with_other_files(self):
+        # A single file that started early but kept getting appended to
+        # over days (e.g. a long-running OpenCode/Claude session) must not
+        # drag its LATER prompts to the front just because its FIRST
+        # prompt's timestamp made the whole file sort early.
+        long_lived = self.tmpdir / "long_lived.jsonl"
+        long_lived.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "user", "sessionId": "s1", "timestamp": "2026-09-23T04:51:38Z", "message": {"content": "day1 prompt"}}),
+                    json.dumps({"type": "user", "sessionId": "s1", "timestamp": "2026-09-28T10:35:54Z", "message": {"content": "day5 prompt"}}),
+                ]
+            )
+            + "\n"
+        )
+        short_lived = self.tmpdir / "short_lived.jsonl"
+        short_lived.write_text(
+            json.dumps({"type": "user", "sessionId": "s2", "timestamp": "2026-09-23T05:02:09Z", "message": {"content": "same-day other session"}})
+            + "\n"
+        )
+
+        prompts = model.build_prompts_from_files([long_lived, short_lived])
+        texts_in_order = [p.user_text for p in prompts]
+        self.assertEqual(
+            texts_in_order,
+            ["day1 prompt", "same-day other session", "day5 prompt"],
+        )
 
 
 class TestBuildSaveDocument(unittest.TestCase):
