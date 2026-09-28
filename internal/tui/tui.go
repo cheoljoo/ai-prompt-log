@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -48,6 +49,7 @@ var (
 	styleGreen          = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
 	styleBrightMagenta  = lipgloss.NewStyle().Foreground(lipgloss.Color("13")).Bold(true)
 	styleBold           = lipgloss.NewStyle().Bold(true)
+	styleSearchMatch    = lipgloss.NewStyle().Reverse(true).Bold(true).Foreground(lipgloss.Color("3"))
 	paneStyle           = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
 	paneFocusStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6"))
 	labelStyle          = lipgloss.NewStyle().Bold(true)
@@ -97,12 +99,75 @@ func finalResultText(p model.Prompt) string {
 	return strings.Join(texts, "\n\n")
 }
 
+// searchPrefix returns the vi-style prefix character for a search mode:
+// "/" for both fields, "<" for User Prompt only, ">" for Final Result only.
+func searchPrefix(mode string) string {
+	switch mode {
+	case "user":
+		return "<"
+	case "final":
+		return ">"
+	default:
+		return "/"
+	}
+}
+
+// promptMatchesSearch reports whether `term` (case-insensitive) occurs in
+// the field(s) selected by `mode`: "user" (User Prompt text only), "final"
+// (Final Result text only), or "both" (either field).
+func promptMatchesSearch(p model.Prompt, term, mode string) bool {
+	if term == "" {
+		return false
+	}
+	termL := strings.ToLower(term)
+	if (mode == "both" || mode == "user") && strings.Contains(strings.ToLower(p.UserText), termL) {
+		return true
+	}
+	if (mode == "both" || mode == "final") && strings.Contains(strings.ToLower(finalResultText(p)), termL) {
+		return true
+	}
+	return false
+}
+
+// highlightText wraps every case-insensitive occurrence of `term` in
+// `text` with reverse-video styling so search matches stand out. Returns
+// `text` unchanged if `term` is empty or not found.
+func highlightText(text, term string) string {
+	if term == "" {
+		return text
+	}
+	lowerText := strings.ToLower(text)
+	lowerTerm := strings.ToLower(term)
+	tlen := len(term)
+	var b strings.Builder
+	pos := 0
+	for {
+		rel := strings.Index(lowerText[pos:], lowerTerm)
+		if rel == -1 {
+			b.WriteString(text[pos:])
+			break
+		}
+		idx := pos + rel
+		b.WriteString(text[pos:idx])
+		b.WriteString(styleSearchMatch.Render(text[idx : idx+tlen]))
+		pos = idx + tlen
+	}
+	return b.String()
+}
+
 // formatPromptDetail renders USER -> FINAL-RESULT -> ASSISTANT (not just
 // USER -> ASSISTANT) so the prompt and its conclusion are visible
 // immediately, with the full tool-by-tool trace available below only if
 // needed -- the final result text is deliberately repeated at the end of
 // ASSISTANT too, in its original place in the trace.
 func formatPromptDetail(p model.Prompt) string {
+	return formatPromptDetailWithSearch(p, "", "both")
+}
+
+// formatPromptDetailWithSearch is formatPromptDetail plus highlighting of
+// `searchTerm` occurrences within the User Prompt and/or Final Result text,
+// according to `searchMode` ("both" | "user" | "final").
+func formatPromptDetailWithSearch(p model.Prompt, searchTerm, searchMode string) string {
 	var b strings.Builder
 
 	srcBadge := styleCyan.Render("[claude]")
@@ -131,13 +196,21 @@ func formatPromptDetail(p model.Prompt) string {
 	b.WriteString("  ")
 	b.WriteString(strings.Join(meta, "  "))
 	b.WriteString("\n")
-	b.WriteString(p.UserText)
+	if searchMode == "both" || searchMode == "user" {
+		b.WriteString(highlightText(p.UserText, searchTerm))
+	} else {
+		b.WriteString(p.UserText)
+	}
 	b.WriteString("\n\n")
 
 	if final := finalResultText(p); final != "" {
 		b.WriteString(styleFinalBadge.Render(" FINAL-RESULT "))
 		b.WriteString("\n\n")
-		b.WriteString(final)
+		if searchMode == "both" || searchMode == "final" {
+			b.WriteString(highlightText(final, searchTerm))
+		} else {
+			b.WriteString(final)
+		}
 		b.WriteString("\n\n")
 	}
 
@@ -223,6 +296,15 @@ type Model struct {
 	currentMTimes     map[string]time.Time
 	changesPending    bool
 	statusMessage     string
+
+	// Search state (vi-style: /both, <user-only, >final-only, n/p to
+	// navigate matches). searchMatches holds indices into currentPrompts.
+	searchInput       textinput.Model
+	searchBarVisible  bool
+	searchTerm        string
+	searchMode        string // "both" | "user" | "final"
+	pendingSearchMode string
+	searchMatches     []int
 }
 
 // NewWithFilter builds the initial model respecting the source filter.
@@ -235,7 +317,11 @@ func NewWithFilter(mode, rootDir, sourceFilter string) Model {
 		rootDir:      rootDir,
 		sourceFilter: sourceFilter,
 		detail:       viewport.New(10, 10),
+		searchMode:   "both",
 	}
+	m.searchInput = textinput.New()
+	m.searchInput.Placeholder = "search keyword…"
+	m.searchInput.Prompt = "/ "
 
 	promptCols := []table.Column{
 		{Title: "Date", Width: 19},
@@ -282,6 +368,8 @@ func New(mode, rootDir string) Model {
 }
 
 func (m *Model) setPromptsFrom(proj model.Project) {
+	m.searchTerm = ""
+	m.searchMatches = nil
 	prompts := proj.LoadPrompts()
 	m.currentPrompts = make([]model.Prompt, len(prompts))
 	for i, p := range prompts {
@@ -397,7 +485,7 @@ func (m *Model) refreshDetail() {
 	if idx < 0 || idx >= len(m.currentPrompts) {
 		idx = 0
 	}
-	m.detail.SetContent(formatPromptDetail(m.currentPrompts[idx]))
+	m.detail.SetContent(formatPromptDetailWithSearch(m.currentPrompts[idx], m.searchTerm, m.searchMode))
 	m.detail.GotoTop()
 }
 
@@ -452,9 +540,18 @@ func (m *Model) layout() {
 	m.promptsTable.SetHeight(contentH)
 	m.detail.Width = detailW - borderW
 	m.detail.Height = contentH
+
+	searchW := m.width - 4
+	if searchW < 10 {
+		searchW = 10
+	}
+	m.searchInput.Width = searchW
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.searchBarVisible {
+		return m.handleSearchKey(msg)
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -480,8 +577,131 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focusPrev()
 	case "ctrl+l":
 		m.reload()
+	case "/":
+		return m, m.beginSearch("both")
+	case "<":
+		return m, m.beginSearch("user")
+	case ">":
+		return m, m.beginSearch("final")
+	case "n":
+		m.searchNext()
+	case "p":
+		m.searchPrev()
 	}
 	return m, nil
+}
+
+// handleSearchKey routes key events to the search input widget while the
+// search bar is open, intercepting only Enter (submit) and Esc (cancel).
+func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		m.submitSearch()
+		return m, nil
+	case tea.KeyEsc:
+		m.cancelSearch()
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.searchInput, cmd = m.searchInput.Update(msg)
+	return m, cmd
+}
+
+// beginSearch opens the search bar in the given mode ("both" | "user" |
+// "final") and focuses it, returning the cursor-blink command.
+func (m *Model) beginSearch(mode string) tea.Cmd {
+	m.pendingSearchMode = mode
+	m.searchBarVisible = true
+	m.searchInput.Prompt = searchPrefix(mode) + " "
+	m.searchInput.SetValue("")
+	return m.searchInput.Focus()
+}
+
+// cancelSearch closes the search bar without changing any active search
+// (Esc while the search bar is open).
+func (m *Model) cancelSearch() {
+	m.searchBarVisible = false
+	m.searchInput.Blur()
+}
+
+// submitSearch runs on Enter inside the search bar: closes the bar,
+// computes every matching prompt, and jumps to the first match at/after
+// the current cursor (wrapping), vi-search style. An empty keyword clears
+// any previously active search instead.
+func (m *Model) submitSearch() {
+	term := strings.TrimSpace(m.searchInput.Value())
+	m.searchBarVisible = false
+	m.searchInput.Blur()
+
+	if term == "" {
+		m.searchTerm = ""
+		m.searchMatches = nil
+		m.statusMessage = ""
+		return
+	}
+
+	m.searchTerm = term
+	m.searchMode = m.pendingSearchMode
+	m.searchMatches = nil
+	for i, p := range m.currentPrompts {
+		if promptMatchesSearch(p, m.searchTerm, m.searchMode) {
+			m.searchMatches = append(m.searchMatches, i)
+		}
+	}
+	if len(m.searchMatches) > 0 {
+		m.searchNext()
+	} else {
+		m.statusMessage = fmt.Sprintf("'%s': 검색 결과 없음", term)
+	}
+}
+
+// searchNext jumps to the next match strictly after the cursor, wrapping
+// around to the first match if the cursor is at or after the last one.
+func (m *Model) searchNext() {
+	if m.searchTerm == "" || len(m.searchMatches) == 0 {
+		return
+	}
+	cur := m.promptsTable.Cursor()
+	target := m.searchMatches[0]
+	for _, idx := range m.searchMatches {
+		if idx > cur {
+			target = idx
+			break
+		}
+	}
+	m.jumpToSearchMatch(target)
+}
+
+// searchPrev jumps to the previous match strictly before the cursor,
+// wrapping around to the last match if the cursor is at or before the
+// first one.
+func (m *Model) searchPrev() {
+	if m.searchTerm == "" || len(m.searchMatches) == 0 {
+		return
+	}
+	cur := m.promptsTable.Cursor()
+	target := m.searchMatches[len(m.searchMatches)-1]
+	for _, idx := range m.searchMatches {
+		if idx < cur {
+			target = idx
+		} else {
+			break
+		}
+	}
+	m.jumpToSearchMatch(target)
+}
+
+func (m *Model) jumpToSearchMatch(target int) {
+	m.promptsTable.SetCursor(target)
+	m.refreshDetail()
+	pos := 0
+	for i, idx := range m.searchMatches {
+		if idx == target {
+			pos = i + 1
+			break
+		}
+	}
+	m.statusMessage = fmt.Sprintf("%s%s  (%d/%d)", searchPrefix(m.searchMode), m.searchTerm, pos, len(m.searchMatches))
 }
 
 func (m *Model) cursorDown() {
@@ -662,7 +882,7 @@ func (m Model) View() string {
 	panes = append(panes, m.renderPane("Detail", m.detail.View(), m.focus == paneDetail))
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, panes...)
-	footer := styleDim.Render("j/k move  g/G top/bottom  ^F/^B/Space page  ^D/^U half-page  l/Tab/Enter next pane  h/S-Tab/Esc prev pane  ^L reload  q quit")
+	footer := styleDim.Render("j/k move  g/G top/bottom  ^F/^B/Space page  ^D/^U half-page  l/Tab/Enter next pane  h/S-Tab/Esc prev pane  /</> search  n/p next/prev match  ^L reload  q quit")
 	if m.statusMessage != "" {
 		style := styleDim
 		if m.changesPending {
@@ -670,7 +890,12 @@ func (m Model) View() string {
 		}
 		footer = style.Render(m.statusMessage) + "  " + footer
 	}
-	return body + "\n" + footer
+	view := body + "\n"
+	if m.searchBarVisible {
+		view += m.searchInput.View() + "\n"
+	}
+	view += footer
+	return view
 }
 
 func (m Model) renderPane(title, body string, focused bool) string {

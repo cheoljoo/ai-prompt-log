@@ -7,11 +7,23 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/cheoljoo/ai-prompt-log/internal/backup"
 	"github.com/cheoljoo/ai-prompt-log/internal/model"
 	"github.com/cheoljoo/ai-prompt-log/internal/source"
 )
+
+// TestMain forces a TrueColor lipgloss profile for the whole package's test
+// run. Without this, lipgloss auto-detects "no color" for the non-tty
+// output stream `go test` runs under, which turns every Style.Render()
+// call in tui.go into a no-op -- making it impossible to assert on
+// search-highlighting output (see search_test.go).
+func TestMain(m *testing.M) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	os.Exit(m.Run())
+}
 
 func update(m Model, msg tea.Msg) Model {
 	next, _ := m.Update(msg)
