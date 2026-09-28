@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/cheoljoo/ai-prompt-log/compare/v0.9.1...v0.9.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* sort merged prompts by own timestamp; display timestamps in local time ([#23](https://github.com/cheoljoo/ai-prompt-log/issues/23)) ([fc4458d](https://github.com/cheoljoo/ai-prompt-log/commit/fc4458d3474bee11eb0892489ce7c3ed60cc8b21))
+
 ## [0.9.1](https://github.com/cheoljoo/ai-prompt-log/compare/v0.9.0...v0.9.1) (2026-09-28)
 
 
