@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/cheoljoo/ai-prompt-log/compare/v0.9.0...v0.9.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* display prompt/session timestamps in local timezone, not raw UTC ([#21](https://github.com/cheoljoo/ai-prompt-log/issues/21)) ([eceaade](https://github.com/cheoljoo/ai-prompt-log/commit/eceaadee3a0505a3d6d4c11274dffa8625f03f9b))
+
 ## [0.9.0](https://github.com/cheoljoo/ai-prompt-log/compare/v0.8.0...v0.9.0) (2026-09-28)
 
 
