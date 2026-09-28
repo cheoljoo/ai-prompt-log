@@ -71,6 +71,46 @@ def _source_style(src: str) -> str:
     return "dim"
 
 
+def _parse_utc_ts(ts: str) -> datetime | None:
+    """Parse a stored (always-UTC) ISO8601 timestamp string into a
+    timezone-aware datetime. Returns None if `ts` is empty/unparseable."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _local_ts(ts: str) -> str:
+    """Render a stored UTC timestamp in the system's local timezone,
+    "YYYY-MM-DDTHH:MM:SS" (19 chars, matching the previous raw-UTC slice
+    width) for compact table columns.
+
+    All prompt/session timestamps in this codebase are parsed/stored/sorted
+    as UTC ("Z"-suffixed ISO8601) -- see docs/data-model.md -- which is
+    correct for internal consistency, but was previously displayed as-is
+    (just string-sliced), so a prompt made at 13:51 KST showed up as
+    "...T04:51:38" with no timezone marker, easily misread as 4:51am local
+    time. This converts to local wall-clock time for display only; parsing,
+    sorting, and --save/export continue to use the raw UTC string.
+    """
+    dt = _parse_utc_ts(ts)
+    if dt is None:
+        return ts[:19] if ts else "-"
+    return dt.astimezone().isoformat()[:19]
+
+
+def _local_ts_full(ts: str) -> str:
+    """Like _local_ts(), but keeps the UTC offset (e.g. "+09:00") so it's
+    self-evidently local time, not UTC -- used where there's room to spare
+    (the Detail pane's USER header), rather than a narrow table column."""
+    dt = _parse_utc_ts(ts)
+    if dt is None:
+        return ts or ""
+    return dt.astimezone().isoformat(timespec="seconds")
+
+
 def _recency_style(ts: str) -> str:
     if not ts:
         return "dim"
@@ -164,7 +204,7 @@ def format_prompt_detail(
     passing raw Rich renderables to Static crashes on this Textual version
     (see agents/B-poc.md).
     """
-    meta = [f"[dim]{escape(prompt.timestamp)}[/dim]"]
+    meta = [f"[dim]{escape(_local_ts_full(prompt.timestamp))}[/dim]"]
     if prompt.source:
         src_color = _source_style(prompt.source)
         meta.append(f"[{src_color}]{escape(prompt.source)}[/{src_color}]")
@@ -341,7 +381,7 @@ class AplScreen(Screen):
                     Text(p.display_name, style="bold cyan"),
                     Text(p.source, style=src_style),
                     Text(str(p.prompt_count), style="dim"),
-                    Text(p.last_activity[:19] or "-", style=_recency_style(p.last_activity)),
+                    Text(_local_ts(p.last_activity), style=_recency_style(p.last_activity)),
                     key=str(idx),
                 )
             projects_table.focus()
@@ -421,7 +461,7 @@ class AplScreen(Screen):
                 tag = ""
             src_style = _source_style(p.source or "claude")
             table.add_row(
-                Text(p.timestamp[:19] or "-", style="dim"),
+                Text(_local_ts(p.timestamp), style="dim"),
                 Text(p.source or "claude", style=src_style),
                 Text(p.branch or "-", style="magenta"),
                 Text(_format_tokens(p.total_tokens), style="blue"),
