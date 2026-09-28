@@ -57,6 +57,20 @@ class TestFormatDetection(unittest.TestCase):
         )
         self.assertEqual(model.detect_file_format(f), "opencode")
 
+    def test_detect_copilot_metadata(self):
+        f = self.tmpdir / "copilot_backed_up.jsonl"
+        f.write_text(
+            json.dumps({"type": "copilot_metadata", "cwd": "/test/path", "sessionId": "abc"}) + "\n"
+        )
+        self.assertEqual(model.detect_file_format(f), "copilot")
+
+    def test_detect_copilot_events(self):
+        f = self.tmpdir / "events.jsonl"
+        f.write_text(
+            json.dumps({"type": "session.start", "data": {"context": {"cwd": "/test/path"}}}) + "\n"
+        )
+        self.assertEqual(model.detect_file_format(f), "copilot")
+
 
 class TestParsers(unittest.TestCase):
     def setUp(self):
@@ -167,6 +181,56 @@ class TestParsers(unittest.TestCase):
         self.assertEqual(p.blocks[0].tool_name, "bash")
         self.assertEqual(p.blocks[1].kind, "text")
         self.assertEqual(p.blocks[1].text, "Done.")
+
+    def test_parse_copilot(self):
+        f = self.tmpdir / "events.jsonl"
+        lines = [
+            json.dumps({
+                "type": "session.start",
+                "timestamp": "2026-09-28T00:00:00Z",
+                "data": {"context": {"cwd": "/test/path", "gitRoot": "/test/path", "branch": "main"}},
+            }),
+            json.dumps({
+                "type": "user.message",
+                "timestamp": "2026-09-28T00:00:01Z",
+                "data": {"content": "add copilot support"},
+            }),
+            json.dumps({
+                "type": "assistant.message",
+                "timestamp": "2026-09-28T00:00:02Z",
+                "data": {
+                    "content": "Done.",
+                    "toolRequests": [
+                        {"toolCallId": "1", "name": "create", "arguments": {"path": "/a/new.py", "content": "x"}},
+                    ],
+                },
+            }),
+        ]
+        f.write_text("\n".join(lines) + "\n")
+        prompts = model.parse_copilot_events_file(f, session_id="conv-1", default_branch="main")
+        self.assertEqual(len(prompts), 1)
+        p = prompts[0]
+        self.assertEqual(p.source, "copilot")
+        self.assertEqual(p.user_text, "add copilot support")
+        self.assertEqual(p.branch, "main")
+        self.assertEqual(p.session_id, "conv-1")
+        self.assertEqual(len(p.blocks), 2)
+        self.assertEqual(p.blocks[0].kind, "text")
+        self.assertEqual(p.blocks[0].text, "Done.")
+        self.assertEqual(p.blocks[1].kind, "tool_use")
+        self.assertEqual(p.blocks[1].tool_name, "create")
+        self.assertEqual(p.blocks[1].tool_input["path"], "/a/new.py")
+
+    def test_parse_copilot_session_id_fallback(self):
+        session_dir = self.tmpdir / "0928abcd-uuid"
+        session_dir.mkdir()
+        f = session_dir / "events.jsonl"
+        f.write_text(
+            json.dumps({"type": "user.message", "timestamp": "2026-09-28T00:00:00Z", "data": {"content": "hi"}}) + "\n"
+        )
+        prompts = model.parse_copilot_events_file(f)
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0].session_id, "0928abcd-uuid")
 
     def test_parse_gemini_json(self):
         f = self.tmpdir / "session.json"
@@ -377,6 +441,14 @@ class TestFileChanges(unittest.TestCase):
             [("/a/new.py", "created"), ("/a/old.py", "modified"), ("/tmp/gone.py", "deleted")],
         )
 
+    def test_copilot_create_and_edit(self):
+        blocks = [
+            model.AssistantBlock("tool_use", tool_name="create", tool_input={"path": "/a/new.py", "content": "x"}),
+            model.AssistantBlock("tool_use", tool_name="edit", tool_input={"path": "/a/existing.py"}),
+        ]
+        changes = self._prompt(blocks).file_changes
+        self.assertEqual(changes, [("/a/new.py", "created"), ("/a/existing.py", "modified")])
+
     def test_gemini_write_file(self):
         blocks = [
             model.AssistantBlock("tool_use", tool_name="write_file", tool_input={"file_path": "out.py", "content": "x"}),
@@ -390,6 +462,52 @@ class TestFileChanges(unittest.TestCase):
             model.AssistantBlock("tool_use", tool_name="Read", tool_input={"file_path": "/a/x.py"}),
         ]
         self.assertEqual(self._prompt(blocks).file_changes, [])
+
+
+class TestCopilotSource(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_scan_and_parse(self):
+        session_dir = self.tmpdir / "sess-uuid-1"
+        session_dir.mkdir()
+        (session_dir / "workspace.yaml").write_text(
+            "id: sess-uuid-1\n"
+            "cwd: /data01/test-proj\n"
+            "git_root: /data01/test-proj\n"
+            "branch: main\n"
+            "name: my session\n"
+        )
+        (session_dir / "events.jsonl").write_text(
+            json.dumps({
+                "type": "user.message",
+                "timestamp": "2026-09-28T00:00:00Z",
+                "data": {"content": "hello copilot"},
+            }) + "\n"
+        )
+
+        # A session dir missing events.jsonl should be skipped.
+        empty_dir = self.tmpdir / "sess-empty"
+        empty_dir.mkdir()
+
+        convs = source.scan_copilot_sessions(base=self.tmpdir)
+        self.assertEqual(len(convs), 1)
+        c = convs[0]
+        self.assertEqual(c["id"], "sess-uuid-1")
+        self.assertEqual(c["workspace"], "/data01/test-proj")
+        self.assertEqual(c["branch"], "main")
+        self.assertEqual(c["title"], "my session")
+        self.assertEqual(model.detect_file_format(c["transcript"]), "copilot")
+
+        prompts = model.parse_session_file(c["transcript"], session_id=c["id"], default_branch=c["branch"])
+        self.assertEqual(len(prompts), 1)
+        p = prompts[0]
+        self.assertEqual(p.source, "copilot")
+        self.assertEqual(p.user_text, "hello copilot")
+        self.assertEqual(p.branch, "main")
 
 
 class TestBackupAndIntegration(unittest.TestCase):
@@ -425,26 +543,38 @@ class TestBackupAndIntegration(unittest.TestCase):
             }) + "\n"
         )
 
+        copilot_session_dir = self.tmpdir / "copilot-uuid-1"
+        copilot_session_dir.mkdir()
+        copilot_f = copilot_session_dir / "events.jsonl"
+        copilot_f.write_text(
+            json.dumps({
+                "type": "user.message",
+                "timestamp": "2026-09-28T00:00:00Z",
+                "data": {"content": "copilot prompt"},
+            }) + "\n"
+        )
+
         proj = model.Project(
             dir_path=ws_path,
             display_name="test-proj",
             cwd=str(ws_path),
-            session_files=[claude_f, agy_f, opencode_f],
+            session_files=[claude_f, agy_f, opencode_f, copilot_f],
             conv_metadata={
                 "agy_transcript": {"branch": "main", "id": "agy-123"},
                 "opencode_session": {"id": "ses_1"},
+                "copilot-uuid-1": {"branch": "main", "id": "copilot-uuid-1"},
             },
         )
 
         copied, updated, unchanged = backup.copy_project(proj, self.backup_dir)
-        self.assertEqual(copied, 3)
+        self.assertEqual(copied, 4)
         self.assertEqual(updated, 0)
         self.assertEqual(unchanged, 0)
 
         # Re-copy: should be unchanged
         copied2, updated2, unchanged2 = backup.copy_project(proj, self.backup_dir)
         self.assertEqual(copied2, 0)
-        self.assertEqual(unchanged2, 3)
+        self.assertEqual(unchanged2, 4)
 
         # Verify load_projects on backup dir
         loaded_projs = model.load_projects(self.backup_dir)
@@ -453,9 +583,9 @@ class TestBackupAndIntegration(unittest.TestCase):
         self.assertEqual(lp.display_name, "test-proj")
         self.assertEqual(lp.cwd, str(ws_path))
         loaded_prompts = lp.load_prompts()
-        self.assertEqual(len(loaded_prompts), 3)
+        self.assertEqual(len(loaded_prompts), 4)
         sources = {p.source for p in loaded_prompts}
-        self.assertEqual(sources, {"claude", "agy", "opencode"})
+        self.assertEqual(sources, {"claude", "agy", "opencode", "copilot"})
 
 
 if __name__ == "__main__":

@@ -39,7 +39,7 @@ class Prompt:
     user_text: str
     blocks: list = field(default_factory=list)  # list[AssistantBlock]
     total_tokens: int = 0
-    source: str = "claude"  # "claude" | "agy" | "gemini" | "opencode"
+    source: str = "claude"  # "claude" | "agy" | "gemini" | "opencode" | "copilot"
 
     @property
     def is_command(self) -> bool:
@@ -101,6 +101,7 @@ _FILE_TOOL_OPS: dict[str, tuple[str, str]] = {
     "write_to_file": ("TargetFile", "created"),
     "replace_file_content": ("TargetFile", "modified"),
     "write_file": ("file_path", "created"),
+    "create": ("path", "created"),  # Copilot CLI
 }
 
 # tool_name -> input key holding the raw shell command string
@@ -198,11 +199,12 @@ def extract_file_changes(prompt: "Prompt") -> list[tuple[str, str]]:
             path = inp.get(key)
             if path:
                 raw.append((path, action))
-        elif name == "edit":  # OpenCode's edit tool
-            path = inp.get("filePath")
-            if path:
+        elif name == "edit":  # OpenCode's edit tool (filePath) or Copilot's (path)
+            if inp.get("filePath"):
                 action = "modified" if inp.get("oldString") else "created"
-                raw.append((path, action))
+                raw.append((inp["filePath"], action))
+            elif inp.get("path"):
+                raw.append((inp["path"], "modified"))
         elif name in _SHELL_TOOL_COMMAND_KEYS:
             command = inp.get(_SHELL_TOOL_COMMAND_KEYS[name], "")
             raw.extend(_bash_file_ops(command))
@@ -347,6 +349,59 @@ def parse_opencode_session_file(path: Path) -> list[Prompt]:
     prompts = parse_claude_session_file(path)
     for p in prompts:
         p.source = "opencode"
+    return prompts
+
+
+def parse_copilot_events_file(
+    path: Path, session_id: str = "", default_branch: str = ""
+) -> list[Prompt]:
+    """Return Prompts found in a GitHub Copilot CLI session's events.jsonl.
+    See docs/data-model.md §11."""
+    prompts: list[Prompt] = []
+    current: Prompt | None = None
+    sid = session_id
+    branch = default_branch
+
+    for rec in _iter_records(path):
+        rtype = rec.get("type")
+        data = rec.get("data") or {}
+
+        if rtype == "copilot_metadata":
+            if data.get("gitBranch"):
+                branch = data["gitBranch"]
+            if data.get("sessionId"):
+                sid = data["sessionId"]
+            continue
+
+        if rtype == "user.message":
+            content = data.get("content", "")
+            current = Prompt(
+                session_id=sid,
+                timestamp=rec.get("timestamp", ""),
+                branch=branch,
+                sidechain=False,
+                user_text=content,
+                source="copilot",
+            )
+            prompts.append(current)
+        elif rtype == "assistant.message":
+            if current is None:
+                continue
+            text = data.get("content", "")
+            if text:
+                current.blocks.append(AssistantBlock("text", text=text))
+            for tr in data.get("toolRequests") or []:
+                name = tr.get("name") or "?"
+                targs = _clean_tool_input(tr.get("arguments") or {})
+                current.blocks.append(
+                    AssistantBlock("tool_use", tool_name=name, tool_input=targs)
+                )
+
+    if not sid:
+        sid = path.parent.name
+    for p in prompts:
+        if not p.session_id:
+            p.session_id = sid
     return prompts
 
 
@@ -522,7 +577,7 @@ def parse_gemini_jsonl_file(path: Path) -> list[Prompt]:
 
 def detect_file_format(path: Path) -> str:
     """Detect format of a session log file: 'claude', 'agy', 'opencode',
-    'gemini_json', or 'gemini_jsonl'."""
+    'copilot', 'gemini_json', or 'gemini_jsonl'."""
     try:
         with path.open("r", errors="ignore") as fh:
             chunk = fh.read(4096)
@@ -550,6 +605,10 @@ def detect_file_format(path: Path) -> str:
                     return "opencode"
                 if rtype == "gemini_metadata":
                     return "gemini_jsonl"
+                if rtype == "copilot_metadata":
+                    return "copilot"
+                if rtype in ("session.start", "user.message", "assistant.message"):
+                    return "copilot"
                 if rtype in ("USER_INPUT", "PLANNER_RESPONSE", "LIST_DIRECTORY", "VIEW_FILE"):
                     return "agy"
                 if rec.get("source") in ("USER_EXPLICIT", "MODEL"):
@@ -578,6 +637,10 @@ def parse_session_file(
         )
     if fmt == "opencode":
         return parse_opencode_session_file(path)
+    if fmt == "copilot":
+        return parse_copilot_events_file(
+            path, session_id=session_id, default_branch=default_branch
+        )
     if fmt == "gemini_json":
         return parse_gemini_json_file(path)
     if fmt == "gemini_jsonl":
@@ -641,6 +704,12 @@ def build_prompts_from_files(
         meta = conv_metadata.get(f.stem) or {}
         if not meta and f.parent.name == "logs" and f.parent.parent.name == ".system_generated":
             meta = conv_metadata.get(f.parent.parent.parent.name) or {}
+        if not meta and f.name == "events.jsonl":
+            # Every Copilot CLI session's transcript is named events.jsonl,
+            # so f.stem ("events") collides across sessions; use the parent
+            # directory (the session uuid) instead, matching
+            # source.scan_copilot_sessions().
+            meta = conv_metadata.get(f.parent.name) or {}
         prompts.extend(
             parse_session_file(
                 f,
@@ -715,10 +784,23 @@ def load_project(target: Path, source_filter: str = "all") -> Project:
             metadata[t.stem] = c
             sources_found.add("opencode")
 
+    for c in info.get("copilot_convs", []):
+        t = c.get("transcript")
+        if t and t.exists():
+            all_files.append(t)
+            # Every session's transcript is named events.jsonl, so unlike
+            # agy/opencode above we deliberately do NOT key metadata by
+            # t.stem here (it would collide across every Copilot session in
+            # the workspace); build_prompts_from_files() instead falls back
+            # to the parent directory name (the session uuid).
+            metadata[c["id"]] = c
+            metadata[t.parent.name] = c
+            sources_found.add("copilot")
+
     src_label = (
         "+".join(sorted(sources_found))
         if sources_found
-        else (source_filter if source_filter in ("claude", "opencode") else "agy")
+        else (source_filter if source_filter in ("claude", "opencode", "copilot") else "agy")
     )
     last_activity = max((_session_start_timestamp(f) for f in all_files), default="")
     prompts = build_prompts_from_files(all_files, metadata)
@@ -760,6 +842,7 @@ def load_projects(
     include_claude = source_filter in ("all", "claude")
     include_agy = source_filter in ("all", "agy", "gemini")
     include_opencode = source_filter in ("all", "opencode")
+    include_copilot = source_filter in ("all", "copilot")
 
     projects_by_ws: dict[str, dict] = {}
 
@@ -778,6 +861,7 @@ def load_projects(
                     "agy_convs": [],
                     "gemini_files": [],
                     "opencode_convs": [],
+                    "copilot_convs": [],
                     "conv_metadata": {},
                 },
             )
@@ -797,6 +881,7 @@ def load_projects(
                     "agy_convs": [],
                     "gemini_files": [],
                     "opencode_convs": [],
+                    "copilot_convs": [],
                     "conv_metadata": {},
                 },
             )
@@ -816,6 +901,7 @@ def load_projects(
                     "agy_convs": [],
                     "gemini_files": [],
                     "opencode_convs": [],
+                    "copilot_convs": [],
                     "conv_metadata": {},
                 },
             )
@@ -835,11 +921,39 @@ def load_projects(
                     "agy_convs": [],
                     "gemini_files": [],
                     "opencode_convs": [],
+                    "copilot_convs": [],
                     "conv_metadata": {},
                 },
             )
             entry["opencode_convs"].append(c)
             entry["conv_metadata"][c["id"]] = c
+
+    if include_copilot:
+        for c in source.scan_copilot_sessions():
+            ws = c.get("workspace", "")
+            if not ws:
+                ws = f"copilot-{c['id'][:8]}"
+            entry = projects_by_ws.setdefault(
+                ws,
+                {
+                    "cwd": ws,
+                    "display_name": Path(ws).name,
+                    "claude_files": [],
+                    "agy_convs": [],
+                    "gemini_files": [],
+                    "opencode_convs": [],
+                    "copilot_convs": [],
+                    "conv_metadata": {},
+                },
+            )
+            entry["copilot_convs"].append(c)
+            entry["conv_metadata"][c["id"]] = c
+            t = c.get("transcript")
+            if t:
+                # events.jsonl is the same filename for every session, so
+                # (unlike agy/opencode above) key by the parent directory
+                # (session uuid), not by t.stem -- see build_prompts_from_files().
+                entry["conv_metadata"][t.parent.name] = c
 
     project_list: list[Project] = []
     for ws, data in projects_by_ws.items():
@@ -862,6 +976,11 @@ def load_projects(
             if t and t.exists():
                 all_files.append(t)
                 sources_found.add("opencode")
+        for c in data["copilot_convs"]:
+            t = c.get("transcript")
+            if t and t.exists():
+                all_files.append(t)
+                sources_found.add("copilot")
 
         if not all_files:
             continue

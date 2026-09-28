@@ -124,6 +124,31 @@ def copy_project(proj: model.Project, dest_root: Path) -> tuple[int, int, int]:
                 updated += 1
             else:
                 copied += 1
+        elif fmt == "copilot":
+            # Every session's transcript is named events.jsonl, so (unlike
+            # agy's stem-based lookup) the session uuid is derived from the
+            # parent directory, matching source.scan_copilot_sessions().
+            conv_id = f.parent.name
+            dest_f = dest_dir / f"copilot-{conv_id}.jsonl"
+            existed = dest_f.exists()
+            if existed and dest_f.stat().st_mtime >= f.stat().st_mtime:
+                unchanged += 1
+                continue
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            meta = {
+                "type": "copilot_metadata",
+                "cwd": proj.cwd,
+                "sessionId": conv_id,
+                "gitBranch": proj.conv_metadata.get(conv_id, {}).get("branch", ""),
+            }
+            with dest_f.open("w", errors="ignore") as out_fh:
+                out_fh.write(json.dumps(meta) + "\n")
+                with f.open("r", errors="ignore") as in_fh:
+                    shutil.copyfileobj(in_fh, out_fh)
+            if existed:
+                updated += 1
+            else:
+                copied += 1
         elif fmt in ("gemini_json", "gemini_jsonl"):
             dest_f = dest_dir / f"gemini-{f.stem}.jsonl"
             existed = dest_f.exists()

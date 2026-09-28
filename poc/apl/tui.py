@@ -49,6 +49,8 @@ def _source_style(src: str) -> str:
         return "green"
     if "opencode" in src:
         return "magenta"
+    if "copilot" in src:
+        return "bright_magenta"
     if "gemini" in src:
         return "blue"
     if "claude" in src:
