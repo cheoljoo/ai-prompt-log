@@ -80,7 +80,7 @@ apl --view-backup              # browse a previous --backup (3 panes, like --all
 apl --save                    # save current project's prompts to a JSON file
 apl --save --all              # save every project's prompts
 apl --save --copilot          # save only GitHub Copilot CLI prompts
-apl --save --save-file out.json  # custom output path (default: apl-save-<timestamp>.json)
+apl --save --save-file out.json  # custom output path (default: apl-save.json, overwritten each time)
 apl --save --days 7           # only include prompts from the last 7 days
 apl --save --since 2026-09-01 # only include prompts on/after this date
 
@@ -104,7 +104,7 @@ Claude Code only keeps session logs under `~/.claude/projects/<encoded-cwd>/` â€
 - No `--all`: only the current project's prompts (same nearest-ancestor resolution as plain `apl`).
 - `apl --save --all`: every project, like `apl --all`.
 - Add a source flag (`--copilot`, `--claude`, `--agy`, `--opencode`, `-s/--source`) to restrict to one source.
-- `--save-file PATH`: output path (default: `apl-save-<YYYYMMDD-HHMMSS>.json` in the current directory).
+- `--save-file PATH`: output path (default: `apl-save.json` in the current directory, overwritten on each run).
 - `--since YYYY-MM-DD` or `--days N`: only include prompts starting on/after that date (mutually exclusive with each other; omit both to include everything).
 
 Each prompt is saved with its start/end time, the user prompt, the final assistant response, and the list of modified files:

@@ -54,7 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
             "`apl --save` writes the current view (respecting --all/"
             "--source/--since/--days) to a JSON file -- start/end time, "
             "user prompt, final result, and modified files per prompt -- "
-            "then exits."
+            "then exits. Without --save-file, always writes to "
+            "apl-save.json in the current directory (overwritten each "
+            "run)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"{KEYBINDINGS_HELP}\napl {_version()}\nSource: {GIT_URL}",
@@ -119,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         metavar="PATH",
-        help="Output path for --save (default: apl-save-<timestamp>.json in the current directory)",
+        help="Output path for --save (default: apl-save.json in the current directory, overwritten each time)",
     )
     since_grp = parser.add_mutually_exclusive_group()
     since_grp.add_argument(
@@ -263,8 +265,7 @@ def _run_save(args: argparse.Namespace, source_filter: str) -> None:
 
     save_path = args.save_file
     if save_path is None:
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        save_path = Path(f"apl-save-{ts}.json")
+        save_path = Path("apl-save.json")
 
     with save_path.open("w") as fh:
         json.dump(doc, fh, indent=2, ensure_ascii=False)

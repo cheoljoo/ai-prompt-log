@@ -59,7 +59,7 @@ func main() {
 	depth := flag.Int("depth", 0, "With --backup: walk up N directories from cwd and back up every project whose real cwd is that directory or a descendant of it. Omit to back up only the current project.")
 	backupDir := flag.String("backup-dir", "", "Backup directory for --backup / --view-backup (default: ~/ai-prompt-log.backup/)")
 	doSave := flag.Bool("save", false, "Save the current view (respecting --all/--source filters, --since/--days) to a JSON file -- start/end time, user prompt, final result, and modified files per prompt -- then exit.")
-	saveFile := flag.String("save-file", "", "Output path for --save (default: apl-save-<timestamp>.json in the current directory)")
+	saveFile := flag.String("save-file", "", "Output path for --save (default: apl-save.json in the current directory, overwritten each time)")
 	since := flag.String("since", "", "With --save: only include prompts on/after this date (YYYY-MM-DD). Default: no date filtering (include everything).")
 	days := flag.Int("days", 0, "With --save: only include prompts from the last N days. Mutually exclusive with --since. Default: no date filtering (include everything).")
 	sourceFlag := flag.String("source", "all", "AI assistant log source to display (all, claude, agy, gemini, opencode, copilot)")
@@ -82,7 +82,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "live directories, so it survives a project directory being deleted).\n")
 		fmt.Fprintf(os.Stderr, "`apl --view-backup` browses that backup with the same 3-pane view.\n\n")
 		fmt.Fprintf(os.Stderr, "`apl --save` writes the current view (respecting --all/--source/--since/--days)\n")
-		fmt.Fprintf(os.Stderr, "to a JSON file (start/end time, user prompt, final result, modified files per prompt) and exits.\n\n")
+		fmt.Fprintf(os.Stderr, "to a JSON file (start/end time, user prompt, final result, modified files per prompt) and exits.\n")
+		fmt.Fprintf(os.Stderr, "Without --save-file, always writes to apl-save.json in the current directory (overwritten each run).\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: apl [-a|--all | --backup | --view-backup | --save] [--depth N] [--backup-dir PATH]\n")
 		fmt.Fprintf(os.Stderr, "           [--save-file PATH] [--since YYYY-MM-DD | --days N]\n")
 		fmt.Fprintf(os.Stderr, "           [-s|--source {all,claude,agy,gemini,opencode,copilot} | --agy | --claude | --gemini | --opencode | --copilot]\n\n")
@@ -201,7 +202,7 @@ func main() {
 
 		outPath := *saveFile
 		if outPath == "" {
-			outPath = fmt.Sprintf("apl-save-%s.json", time.Now().Format("20060102-150405"))
+			outPath = "apl-save.json"
 		}
 		if err := os.WriteFile(outPath, data, 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, "apl:", err)
